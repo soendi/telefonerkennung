@@ -27,7 +27,7 @@ jobs:
 
       - name: Build executable
         run: |
-          pyinstaller --onefile --windowed --name Telefonerkennung telefonerkennung.py
+          pyinstaller --onefile --windowed --icon=telefon.ico --name Telefonerkennung telefonerkennung.py
 
       - name: Install Inno Setup
         run: choco install innosetup -y

@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 
 # GitHub-Repo für Update-Checks (owner/rename), z.B. "maxmuster/telefonerkennung".
 # Leer lassen deaktiviert den Update-Check.
@@ -49,6 +49,9 @@ LOG_DIR = APPDATA_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 DB_FILE = APPDATA_DIR / "telefonbuch.db"
+
+# Icon-Datei (liegt neben dem Skript bzw. in der App).
+ICON_FILE = Path(__file__).resolve().with_name("telefon.ico")
 
 APP_TITLE = "Enterprise Telephony"
 
@@ -513,7 +516,22 @@ def reverse_lookup(number, allow_suffix_search=False):
 # SYSTRAY-ICON
 # ============================================================
 
+def set_window_icon(window):
+    """Setzt das Telefon-Icon auf ein beliebiges Tk-Fenster."""
+    try:
+        if ICON_FILE.exists():
+            window.iconbitmap(ICON_FILE)
+    except tk.TclError:
+        pass
+
+
 def create_tray_image():
+    try:
+        if ICON_FILE.exists():
+            return Image.open(ICON_FILE)
+    except OSError:
+        pass
+
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     draw.rounded_rectangle([16, 4, 48, 60], radius=8, fill="#0052a5")
@@ -536,6 +554,7 @@ class CallToast:
         self.window.configure(bg="#1e1e1e")
         self.window.minsize(400, 0)
         self.window.maxsize(400, 99999)
+        set_window_icon(self.window)
 
         frame = tk.Frame(self.window, bg="#1e1e1e")
         frame.pack(fill="both", expand=True)
@@ -912,6 +931,7 @@ class CallerIDApp:
         self.root.title(f"Swisscom Telefonerkennung v{APP_VERSION}")
         self.root.geometry("920x700")
         self.root.minsize(780, 560)
+        set_window_icon(self.root)
 
         self.last_call_id = None
         self.pending = set()
@@ -1689,6 +1709,7 @@ class CallerIDApp:
         dialog.title(f"Durchwahl-Treffer für {original_number}")
         dialog.geometry("680x410")
         dialog.transient(self.root)
+        set_window_icon(dialog)
 
         ttk.Label(
             dialog,
@@ -2190,6 +2211,7 @@ def first_run_csv_import():
 
     root = tk.Tk()
     root.withdraw()
+    set_window_icon(root)
 
     if messagebox.askyesno(
         "Erster Start",

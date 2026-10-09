@@ -11,6 +11,8 @@ DefaultDirName={autopf}\Telefonerkennung
 DefaultGroupName=Telefonerkennung
 OutputDir=installer
 OutputBaseFilename=Telefonerkennung-Setup-{#MyAppVersion}
+SetupIconFile=telefon.ico
+UninstallDisplayIcon={app}\Telefonerkennung.exe
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -25,8 +27,8 @@ Name: "german"; MessagesFile: "compiler:Languages\German.isl"
 Source: "dist\Telefonerkennung.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\Telefonerkennung"; Filename: "{app}\Telefonerkennung.exe"
-Name: "{autodesktop}\Telefonerkennung"; Filename: "{app}\Telefonerkennung.exe"
+Name: "{group}\Telefonerkennung"; Filename: "{app}\Telefonerkennung.exe"; IconFilename: "{app}\Telefonerkennung.exe"
+Name: "{autodesktop}\Telefonerkennung"; Filename: "{app}\Telefonerkennung.exe"; IconFilename: "{app}\Telefonerkennung.exe"
 
 [Run]
 Filename: "{app}\Telefonerkennung.exe"; Description: "Telefonerkennung jetzt starten"; Flags: nowait postinstall skipifsilent
