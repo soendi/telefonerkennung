@@ -32,7 +32,7 @@ APP_VERSION = "1.0.0"
 
 # GitHub-Repo für Update-Checks (owner/rename), z.B. "maxmuster/telefonerkennung".
 # Leer lassen deaktiviert den Update-Check.
-GITHUB_REPO = ""
+GITHUB_REPO = "soendi/telefonerkennung"
 
 SEARCH_CH_API_KEY = "8b09c242997465ed4ca0e9176c103767"
 SEARCH_CH_API_URL = "https://search.ch/tel/api/"
