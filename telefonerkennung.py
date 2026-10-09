@@ -29,7 +29,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 
 # GitHub-Repo für Update-Checks (owner/rename), z.B. "maxmuster/telefonerkennung".
 # Leer lassen deaktiviert den Update-Check.
@@ -2408,7 +2408,7 @@ def check_for_update():
 
 
 def download_and_install_update(url, version):
-    """Lädt den Installer herunter, führt ihn aus und beendet die App."""
+    """Lädt den Installer herunter, startet ihn und beendet die App."""
     try:
         resp = requests.get(url, stream=True, timeout=120)
         resp.raise_for_status()
@@ -2424,19 +2424,32 @@ def download_and_install_update(url, version):
 
         logger.info("Installer heruntergeladen: %s", installer_path)
 
+        # Detached Helper: wartet ~3s, dann startet er den Installer –
+        # erst nachdem wir uns selbst gekillt haben.
         if suffix == ".msi":
-            subprocess.Popen(
-                ["msiexec", "/i", str(installer_path), "/qn", "/norestart"]
+            cmd = (
+                f'ping -n 4 127.0.0.1 >nul & '
+                f'start "" msiexec /i "{installer_path}" /qn /norestart'
             )
         else:
-            subprocess.Popen(
-                [str(installer_path), "/SILENT", "/NORESTART"]
+            cmd = (
+                f'ping -n 4 127.0.0.1 >nul & '
+                f'start "" "{installer_path}" /SILENT /NORESTART'
             )
 
-        # App sofort beenden, damit der Installer die Dateien
-        # ersetzen kann (CloseApplications wartet sonst auf WM_CLOSE,
-        # das unsere App nur mit withdraw() beantwortet).
-        time.sleep(1)
+        subprocess.Popen(
+            cmd,
+            shell=True,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+            | subprocess.DETACHED_PROCESS,
+        )
+
+        # Kompletten Prozessbaum töten (inkl. PyInstaller-Parent),
+        # damit der Installer nicht auf WM_CLOSE warten muss.
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(os.getpid())],
+            capture_output=True,
+        )
         os._exit(0)
 
     except (OSError, requests.RequestException) as e:
