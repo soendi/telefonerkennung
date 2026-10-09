@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 
 # GitHub-Repo für Update-Checks (owner/rename), z.B. "maxmuster/telefonerkennung".
 # Leer lassen deaktiviert den Update-Check.
@@ -2050,8 +2050,13 @@ class CallerIDApp:
                 writer = csv.writer(f, delimiter=";")
                 writer.writerow(["Nummer", "Name", "Quelle"])
                 for row in contacts:
+                    # ="..." schützt die Nummer vor Excel,
+                    # das sonst das führende + entfernt.
+                    num = row["display_number"]
+                    if num and num[0] in "+0":
+                        num = f'="{num}"'
                     writer.writerow(
-                        [row["display_number"], row["name"], row["source"]]
+                        [num, row["name"], row["source"]]
                     )
         except OSError as e:
             messagebox.showerror("Export fehlgeschlagen", str(e))
@@ -2096,6 +2101,10 @@ class CallerIDApp:
             number = (row[0] or "").strip()
             name = (row[1] or "").strip()
             source = (row[2].strip() if len(row) > 2 and row[2] else "Import")
+
+            # Excel-Schutz ="..." wieder entfernen.
+            if number.startswith('="') and number.endswith('"'):
+                number = number[2:-1]
 
             if not number or not name:
                 skipped += 1
@@ -2337,6 +2346,9 @@ def first_run_csv_import():
                         if len(row) > 2 and row[2]
                         else "Import"
                     )
+                    # Excel-Schutz ="..." wieder entfernen.
+                    if number.startswith('="') and number.endswith('"'):
+                        number = number[2:-1]
                     if not number or not name:
                         continue
                     try:
