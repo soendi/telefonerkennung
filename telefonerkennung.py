@@ -29,7 +29,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 
 # GitHub-Repo für Update-Checks (owner/rename), z.B. "maxmuster/telefonerkennung".
 # Leer lassen deaktiviert den Update-Check.
@@ -2424,17 +2424,19 @@ def download_and_install_update(url, version):
 
         logger.info("Installer heruntergeladen: %s", installer_path)
 
-        # Detached Helper: wartet ~3s, dann startet er den Installer –
-        # erst nachdem wir uns selbst gekillt haben.
+        # Detached Helper: wartet ~3s, startet den Installer, wartet
+        # auf dessen Ende und startet dann die neue App.
         if suffix == ".msi":
             cmd = (
                 f'ping -n 4 127.0.0.1 >nul & '
-                f'start "" msiexec /i "{installer_path}" /qn /norestart'
+                f'start /wait "" msiexec /i "{installer_path}" /qn /norestart & '
+                f'start "" "%ProgramFiles%\\Telefonerkennung\\Telefonerkennung.exe"'
             )
         else:
             cmd = (
                 f'ping -n 4 127.0.0.1 >nul & '
-                f'start "" "{installer_path}" /SILENT /NORESTART'
+                f'start /wait "" "{installer_path}" /SILENT /NORESTART & '
+                f'start "" "%ProgramFiles%\\Telefonerkennung\\Telefonerkennung.exe"'
             )
 
         subprocess.Popen(
