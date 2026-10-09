@@ -29,7 +29,14 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
+
+# True, sobald ein Update installiert wird: on_close beendet die App
+# dann wirklich, statt sie in den Tray zu schicken.
+SHUTTING_DOWN_FOR_UPDATE = False
+
+# Globale Referenz auf die App-Instanz (für _really_quit aus Workers).
+_app_instance = None
 
 # GitHub-Repo für Update-Checks (owner/rename), z.B. "maxmuster/telefonerkennung".
 # Leer lassen deaktiviert den Update-Check.
@@ -1525,8 +1532,25 @@ class CallerIDApp:
             self.stop_event.wait(POLL_INTERVAL_MS / 1000)
 
     def on_close(self):
-        # Fenster nur verstecken – Programm laeuft im Systray weiter.
+        # Während eines Updates: App wirklich beenden, damit der
+        # Installer die Dateien ersetzen kann (CloseApplications).
+        if SHUTTING_DOWN_FOR_UPDATE:
+            self._really_quit()
+            return
+        # Sonst: Fenster nur verstecken – Programm laeuft im Systray weiter.
         self._hide_to_tray()
+
+    def _really_quit(self):
+        """App vollständig beenden (kein Tray)."""
+        global SHUTTING_DOWN_FOR_UPDATE
+        SHUTTING_DOWN_FOR_UPDATE = True
+        try:
+            if self.tray_icon is not None:
+                self.tray_icon.stop()
+        except Exception:
+            pass
+        self.stop_event.set()
+        self.root.after(100, self.root.destroy)
 
     # --------------------------------------------------------
     # ANRUFERKENNUNG
@@ -2408,7 +2432,13 @@ def check_for_update():
 
 
 def download_and_install_update(url, version):
-    """Lädt den Installer herunter, startet ihn und beendet die App."""
+    """Lädt den Installer herunter, startet ihn und beendet die App.
+
+    Der Installer läuft als unabhängiger Prozess und schließt die
+    laufende App selbst über CloseApplications (Restart Manager).
+    Danach startet er die neue Version automatisch (RestartApplications).
+    """
+    global SHUTTING_DOWN_FOR_UPDATE
     try:
         resp = requests.get(url, stream=True, timeout=120)
         resp.raise_for_status()
@@ -2424,38 +2454,39 @@ def download_and_install_update(url, version):
 
         logger.info("Installer heruntergeladen: %s", installer_path)
 
-        # Detached Helper: wartet ~3s, startet den Installer, wartet
-        # auf dessen Ende und startet dann die neue App.
+        # Flag setzen: on_close beendet die App jetzt wirklich.
+        SHUTTING_DOWN_FOR_UPDATE = True
+
+        # Installer als komplett unabhängigen Prozess starten
+        # (nicht als Kind – sonst stirbt er mit uns).
+        creationflags = (
+            subprocess.CREATE_NEW_PROCESS_GROUP
+            | subprocess.DETACHED_PROCESS
+        )
         if suffix == ".msi":
-            cmd = (
-                f'ping -n 4 127.0.0.1 >nul & '
-                f'start /wait "" msiexec /i "{installer_path}" /qn /norestart & '
-                f'start "" "%ProgramFiles%\\Telefonerkennung\\Telefonerkennung.exe"'
+            subprocess.Popen(
+                ["msiexec", "/i", str(installer_path), "/qn", "/norestart"],
+                creationflags=creationflags,
             )
         else:
-            cmd = (
-                f'ping -n 4 127.0.0.1 >nul & '
-                f'start /wait "" "{installer_path}" /SILENT /NORESTART & '
-                f'start "" "%ProgramFiles%\\Telefonerkennung\\Telefonerkennung.exe"'
+            subprocess.Popen(
+                [str(installer_path), "/SILENT", "/NORESTART"],
+                creationflags=creationflags,
             )
 
-        subprocess.Popen(
-            cmd,
-            shell=True,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
-            | subprocess.DETACHED_PROCESS,
-        )
+        logger.info("Installer gestartet, beende App sauber.")
 
-        # Kompletten Prozessbaum töten (inkl. PyInstaller-Parent),
-        # damit der Installer nicht auf WM_CLOSE warten muss.
-        subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(os.getpid())],
-            capture_output=True,
-        )
-        os._exit(0)
+        # App sauber beenden: Tray stoppen, Threads beenden, Fenster
+        # zerstören. Der Installer erkennt, dass die Datei frei ist,
+        # und ersetzt sie.
+        if _app_instance is not None:
+            _app_instance._really_quit()
+        else:
+            os._exit(0)
 
     except (OSError, requests.RequestException) as e:
         logger.error("Update-Installation fehlgeschlagen: %s", e)
+        SHUTTING_DOWN_FOR_UPDATE = False
         return False
 
 
@@ -2472,6 +2503,7 @@ if __name__ == "__main__":
 
     root = tk.Tk()
     app = CallerIDApp(root)
+    _app_instance = app
 
     # Update-Check im Hintergrund; GUI-Dialoge im Hauptthread via after().
     def _update_check_worker():
