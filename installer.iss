@@ -36,3 +36,17 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\Telefonerkennung.exe"; Description: "Telefonerkennung jetzt starten"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// App nach Installation IMMER starten – auch im Silent-Modus.
+// RestartApplications reicht nicht, weil die App sich vorher
+// selbst beendet hat und der Installer sie dadurch nicht kennt.
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    Exec(ExpandConstant('{app}\Telefonerkennung.exe'), '', '', SW_SHOW, ewNoWait, ResultCode);
+  end;
+end;
