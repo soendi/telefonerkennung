@@ -1,7 +1,12 @@
 
+import os
 import queue
 import re
+import shutil
 import sqlite3
+import subprocess
+import sys
+import tempfile
 import threading
 import tkinter as tk
 import xml.etree.ElementTree as ET
@@ -10,6 +15,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import ttk, messagebox, filedialog
 import csv
+import logging
+from logging.handlers import RotatingFileHandler
 
 import requests
 from pywinauto import Desktop
@@ -21,6 +28,12 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
+APP_VERSION = "1.0.0"
+
+# GitHub-Repo für Update-Checks (owner/rename), z.B. "maxmuster/telefonerkennung".
+# Leer lassen deaktiviert den Update-Check.
+GITHUB_REPO = ""
+
 SEARCH_CH_API_KEY = "8b09c242997465ed4ca0e9176c103767"
 SEARCH_CH_API_URL = "https://search.ch/tel/api/"
 
@@ -28,7 +41,14 @@ POLL_INTERVAL_MS = 1000
 GUI_QUEUE_INTERVAL_MS = 100
 MAX_RESULTS = 200
 
-DB_FILE = Path(__file__).resolve().with_name("telefonbuch.db")
+# Daten (DB, Logs) im AppData-Verzeichnis des Benutzers.
+APPDATA_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "Telefonerkennung"
+APPDATA_DIR.mkdir(parents=True, exist_ok=True)
+
+LOG_DIR = APPDATA_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+DB_FILE = APPDATA_DIR / "telefonbuch.db"
 
 APP_TITLE = "Enterprise Telephony"
 
@@ -42,6 +62,39 @@ UNKNOWN_NAMES = {
     "anonymous",
     "anonymer anrufer",
 }
+
+
+# ============================================================
+# LOGGING
+# ============================================================
+
+def setup_logging():
+    logger = logging.getLogger("telefonerkennung")
+    logger.setLevel(logging.INFO)
+
+    if logger.handlers:
+        return logger
+
+    file_handler = RotatingFileHandler(
+        LOG_DIR / "telefonerkennung.log",
+        maxBytes=1_000_000,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    )
+    logger.addHandler(file_handler)
+
+    console = logging.StreamHandler()
+    console.setLevel(logging.WARNING)
+    console.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+    logger.addHandler(console)
+
+    return logger
+
+
+logger = setup_logging()
 
 
 # ============================================================
@@ -856,7 +909,7 @@ def get_incoming_call():
 class CallerIDApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Swisscom Telefonerkennung")
+        self.root.title(f"Swisscom Telefonerkennung v{APP_VERSION}")
         self.root.geometry("920x700")
         self.root.minsize(780, 560)
 
@@ -2107,13 +2160,211 @@ class CallerIDApp:
 
 
 # ============================================================
+# MIGRATION & ERSTSTART
+# ============================================================
+
+LEGACY_DB_FILE = Path(__file__).resolve().with_name("telefonbuch.db")
+
+
+def migrate_legacy_db():
+    """Verschiebt eine alte DB (neben der .py) ins AppData-Verzeichnis."""
+    try:
+        if LEGACY_DB_FILE.exists() and LEGACY_DB_FILE != DB_FILE:
+            if not DB_FILE.exists():
+                shutil.copy2(LEGACY_DB_FILE, DB_FILE)
+                logger.info("Alte DB nach AppData migriert: %s", DB_FILE)
+            else:
+                logger.info(
+                    "Alte DB %s vorhanden, aber neue DB %s existiert bereits – "
+                    "Migration übersprungen.",
+                    LEGACY_DB_FILE, DB_FILE,
+                )
+    except OSError as e:
+        logger.error("DB-Migration fehlgeschlagen: %s", e)
+
+
+def first_run_csv_import():
+    """Fragt beim allerersten Start, ob eine CSV importiert werden soll."""
+    if DB_FILE.exists():
+        return
+
+    root = tk.Tk()
+    root.withdraw()
+
+    if messagebox.askyesno(
+        "Erster Start",
+        "Willkommen! Es wurde noch keine Datenbank gefunden.\n\n"
+        "Möchten Sie jetzt ein Telefonbuch aus einer CSV-Datei importieren?\n"
+        "(Spalten: Nummer;Name;Quelle)",
+    ):
+        path = filedialog.askopenfilename(
+            title="Telefonbuch-CSV auswählen",
+            filetypes=[("CSV-Datei", "*.csv"), ("Alle Dateien", "*.*")],
+        )
+
+        if path:
+            try:
+                with open(path, "r", newline="", encoding="utf-8-sig") as f:
+                    reader = csv.reader(f, delimiter=";")
+                    header = next(reader, None)
+                    if header and "nummer" not in (header[0] or "").lower():
+                        rows = [header] + list(reader)
+                    else:
+                        rows = list(reader)
+
+                imported = 0
+                for row in rows:
+                    if len(row) < 2:
+                        continue
+                    number = (row[0] or "").strip()
+                    name = (row[1] or "").strip()
+                    source = (
+                        row[2].strip()
+                        if len(row) > 2 and row[2]
+                        else "Import"
+                    )
+                    if not number or not name:
+                        continue
+                    try:
+                        save_contact(number, name, source=source)
+                        imported += 1
+                    except ValueError:
+                        pass
+
+                messagebox.showinfo(
+                    "Import abgeschlossen",
+                    f"{imported} Kontakte importiert.",
+                )
+            except (OSError, csv.Error) as e:
+                messagebox.showerror("Import fehlgeschlagen", str(e))
+
+    root.destroy()
+
+
+# ============================================================
+# UPDATE-CHECK
+# ============================================================
+
+def parse_version(text):
+    """Extrahiert eine vergleichbare Versionstupel aus 'v1.2.3' o.ä."""
+    numbers = re.findall(r"\d+", text or "")
+    return tuple(int(n) for n in numbers[:3]) or (0,)
+
+
+def check_for_update():
+    """Prüft GitHub nach einer neueren Version.
+
+    Gibt (version, installer_url) zurück oder None.
+    """
+    if not GITHUB_REPO:
+        return None
+
+    try:
+        resp = requests.get(
+            f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        logger.warning("Update-Check fehlgeschlagen: %s", e)
+        return None
+
+    tag = (data.get("tag_name") or "").lstrip("v")
+    if parse_version(tag) <= parse_version(APP_VERSION):
+        return None
+
+    # Passendes Installer-Asset suchen.
+    installer_url = None
+    for asset in data.get("assets", []):
+        name = (asset.get("name") or "").lower()
+        if name.endswith(".exe") or name.endswith(".msi"):
+            installer_url = asset.get("browser_download_url")
+            break
+
+    if not installer_url:
+        logger.warning("Update %s gefunden, aber kein Installer-Asset.", tag)
+        return None
+
+    return tag, installer_url
+
+
+def download_and_install_update(url, version):
+    """Lädt den Installer herunter und führt ihn aus."""
+    try:
+        resp = requests.get(url, stream=True, timeout=120)
+        resp.raise_for_status()
+
+        suffix = ".msi" if url.lower().endswith(".msi") else ".exe"
+        installer_path = Path(tempfile.gettempdir()) / (
+            f"telefonerkennung-setup-{version}{suffix}"
+        )
+
+        with open(installer_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        logger.info("Installer heruntergeladen: %s", installer_path)
+
+        if suffix == ".msi":
+            subprocess.Popen(
+                ["msiexec", "/i", str(installer_path), "/qn", "/norestart"]
+            )
+        else:
+            subprocess.Popen(
+                [str(installer_path), "/SILENT", "/NORESTART"]
+            )
+
+        return True
+    except (OSError, requests.RequestException) as e:
+        logger.error("Update-Installation fehlgeschlagen: %s", e)
+        return False
+
+
+# ============================================================
 # START
 # ============================================================
 
 if __name__ == "__main__":
+    migrate_legacy_db()
     init_db()
     cleanup_old_call_logs()
+    first_run_csv_import()
+    init_db()  # Erneut nach möglichem CSV-Import.
 
     root = tk.Tk()
     app = CallerIDApp(root)
+
+    # Update-Check im Hintergrund; GUI-Dialoge im Hauptthread via after().
+    def _update_check_worker():
+        result = check_for_update()
+        if not result:
+            return
+        version, url = result
+        logger.info("Update verfügbar: %s → Installation wird gestartet.", version)
+
+        def _install_worker():
+            if download_and_install_update(url, version):
+                root.after(0, lambda: (
+                    messagebox.showinfo(
+                        "Update",
+                        f"Update auf Version {version} wurde installiert.\n"
+                        "Bitte starten Sie das Programm neu.",
+                    ),
+                    os._exit(0),
+                ))
+
+        root.after(
+            0,
+            lambda: messagebox.showinfo(
+                "Update",
+                f"Eine neue Version ({version}) ist verfügbar.\n"
+                "Das Update wird jetzt heruntergeladen und installiert.",
+            ),
+        )
+        threading.Thread(target=_install_worker, daemon=True).start()
+
+    if GITHUB_REPO:
+        threading.Thread(target=_update_check_worker, daemon=True).start()
+
     root.mainloop()
