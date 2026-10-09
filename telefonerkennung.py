@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 import xml.etree.ElementTree as ET
 
@@ -28,7 +29,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 
 # GitHub-Repo für Update-Checks (owner/rename), z.B. "maxmuster/telefonerkennung".
 # Leer lassen deaktiviert den Update-Check.
@@ -1059,20 +1060,11 @@ class CallerIDApp:
                     "Update verfügbar",
                     f"Eine neue Version ({version}) ist verfügbar.\n"
                     f"Aktuelle Version: {APP_VERSION}\n\n"
-                    "Jetzt herunterladen und installieren?",
+                    "Jetzt herunterladen und installieren?\n"
+                    "Die App wird danach beendet.",
                 ):
                     def _install_worker():
-                        if download_and_install_update(url, version):
-                            root = self.root
-                            root.after(0, lambda: (
-                                messagebox.showinfo(
-                                    "Update",
-                                    f"Update auf Version {version} "
-                                    "wurde installiert.\n"
-                                    "Bitte starten Sie das Programm neu.",
-                                ),
-                                os._exit(0),
-                            ))
+                        download_and_install_update(url, version)
 
                     threading.Thread(
                         target=_install_worker, daemon=True
@@ -2416,7 +2408,7 @@ def check_for_update():
 
 
 def download_and_install_update(url, version):
-    """Lädt den Installer herunter und führt ihn aus."""
+    """Lädt den Installer herunter, führt ihn aus und beendet die App."""
     try:
         resp = requests.get(url, stream=True, timeout=120)
         resp.raise_for_status()
@@ -2441,7 +2433,12 @@ def download_and_install_update(url, version):
                 [str(installer_path), "/SILENT", "/NORESTART"]
             )
 
-        return True
+        # App sofort beenden, damit der Installer die Dateien
+        # ersetzen kann (CloseApplications wartet sonst auf WM_CLOSE,
+        # das unsere App nur mit withdraw() beantwortet).
+        time.sleep(1)
+        os._exit(0)
+
     except (OSError, requests.RequestException) as e:
         logger.error("Update-Installation fehlgeschlagen: %s", e)
         return False
@@ -2470,22 +2467,15 @@ if __name__ == "__main__":
         logger.info("Update verfügbar: %s → Installation wird gestartet.", version)
 
         def _install_worker():
-            if download_and_install_update(url, version):
-                root.after(0, lambda: (
-                    messagebox.showinfo(
-                        "Update",
-                        f"Update auf Version {version} wurde installiert.\n"
-                        "Bitte starten Sie das Programm neu.",
-                    ),
-                    os._exit(0),
-                ))
+            download_and_install_update(url, version)
 
         root.after(
             0,
             lambda: messagebox.showinfo(
                 "Update",
                 f"Eine neue Version ({version}) ist verfügbar.\n"
-                "Das Update wird jetzt heruntergeladen und installiert.",
+                "Das Update wird jetzt heruntergeladen und installiert.\n"
+                "Die App wird danach beendet.",
             ),
         )
         threading.Thread(target=_install_worker, daemon=True).start()
