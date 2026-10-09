@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 
 # GitHub-Repo für Update-Checks (owner/rename), z.B. "maxmuster/telefonerkennung".
 # Leer lassen deaktiviert den Update-Check.
@@ -1003,6 +1003,10 @@ class CallerIDApp:
                     "Testanruf simulieren",
                     self.on_tray_test,
                 ),
+                pystray.MenuItem(
+                    "Auf Updates prüfen",
+                    self.on_tray_update_check,
+                ),
                 pystray.MenuItem("Beenden", self.on_tray_exit),
             )
             self.tray_icon = pystray.Icon(
@@ -1028,6 +1032,55 @@ class CallerIDApp:
     def on_tray_test(self):
         print("TEST: on_tray_test aufgerufen")
         self.ui_queue.put(("tray", "test"))
+
+    def on_tray_update_check(self):
+        self.ui_queue.put(("tray", "update_check"))
+
+    def start_update_check(self):
+        """Prüft im Hintergrund auf Updates und installiert ggf."""
+        def _worker():
+            result = check_for_update()
+            if not result:
+                self.root.after(
+                    0,
+                    lambda: messagebox.showinfo(
+                        "Update-Check",
+                        f"Kein Update gefunden.\n"
+                        f"Aktuelle Version: {APP_VERSION}",
+                    ),
+                )
+                return
+
+            version, url = result
+            logger.info("Update gefunden: %s", version)
+
+            def _ask_and_install():
+                if messagebox.askyesno(
+                    "Update verfügbar",
+                    f"Eine neue Version ({version}) ist verfügbar.\n"
+                    f"Aktuelle Version: {APP_VERSION}\n\n"
+                    "Jetzt herunterladen und installieren?",
+                ):
+                    def _install_worker():
+                        if download_and_install_update(url, version):
+                            root = self.root
+                            root.after(0, lambda: (
+                                messagebox.showinfo(
+                                    "Update",
+                                    f"Update auf Version {version} "
+                                    "wurde installiert.\n"
+                                    "Bitte starten Sie das Programm neu.",
+                                ),
+                                os._exit(0),
+                            ))
+
+                    threading.Thread(
+                        target=_install_worker, daemon=True
+                    ).start()
+
+            self.root.after(0, _ask_and_install)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def simulate_call(self):
         print(f"TEST: simulate_call aufgerufen, test_mode={self.test_mode}")
@@ -1440,6 +1493,8 @@ class CallerIDApp:
                         self.show_settings()
                     elif event[1] == "test":
                         self.simulate_call()
+                    elif event[1] == "update_check":
+                        self.start_update_check()
                     elif event[1] == "exit":
                         self.exit_app()
                         return
