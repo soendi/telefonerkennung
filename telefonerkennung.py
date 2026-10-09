@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 
 # GitHub-Repo für Update-Checks (owner/rename), z.B. "maxmuster/telefonerkennung".
 # Leer lassen deaktiviert den Update-Check.
@@ -933,6 +933,11 @@ class CallerIDApp:
         self.root.minsize(780, 560)
         set_window_icon(self.root)
 
+        # Sofort ins Tray: kein Taskbar-Icon, bis das Fenster
+        # explizit aus dem Tray geöffnet wird.
+        self._in_tray = True
+        self.root.withdraw()
+
         self.last_call_id = None
         self.pending = set()
         self.current_unknown_number = None
@@ -962,8 +967,9 @@ class CallerIDApp:
         self.tray_icon = None
         self.setup_tray()
 
-        # Fenster standardmaessig verstecken (wartet im Systray).
-        self.root.withdraw()
+        # Minimieren (Taskleiste/Schliessen-X) → ins Tray statt Taskbar.
+        self.root.bind("<Unmap>", self._on_unmap)
+        self.root.iconify = self._iconify_to_tray
 
         self.build_ui()
         self.refresh_lists()
@@ -1053,9 +1059,40 @@ class CallerIDApp:
             print("TRACE: toast.hide() ausgeführt")
 
     def show_settings(self):
+        self._show_from_tray()
+
+    def _show_from_tray(self):
+        """Fenster aus dem Tray holen – Taskbar-Icon erscheint."""
+        self._in_tray = False
         self.root.deiconify()
+        self.root.state("normal")
+        self.root.attributes("-topmost", True)
         self.root.lift()
         self.root.focus_force()
+        self.root.after(200, lambda: self.root.attributes("-topmost", False))
+
+    def _hide_to_tray(self):
+        """Fenster ins Tray versenken – Taskbar-Icon verschwindet."""
+        self._in_tray = True
+        self.root.withdraw()
+
+    def _iconify_to_tray(self):
+        """Minimieren (Iconify) → ins Tray statt in die Taskleiste."""
+        if self._in_tray:
+            return
+        self._hide_to_tray()
+
+    def _on_unmap(self, event):
+        """Fängt Minimieren ab und versenkt das Fenster ins Tray."""
+        if event.widget != self.root or self._in_tray:
+            return
+        try:
+            if self.root.state() == "iconic":
+                self.root.deiconify()
+                self.root.state("normal")
+                self._hide_to_tray()
+        except tk.TclError:
+            pass
 
     def exit_app(self):
         self.stop_event.set()
@@ -1442,7 +1479,7 @@ class CallerIDApp:
 
     def on_close(self):
         # Fenster nur verstecken – Programm laeuft im Systray weiter.
-        self.root.withdraw()
+        self._hide_to_tray()
 
     # --------------------------------------------------------
     # ANRUFERKENNUNG
