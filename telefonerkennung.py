@@ -29,7 +29,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 
 # GitHub-Repo für Update-Checks (owner/rename), z.B. "maxmuster/telefonerkennung".
 # Leer lassen deaktiviert den Update-Check.
@@ -2479,21 +2479,23 @@ if __name__ == "__main__":
         if not result:
             return
         version, url = result
-        logger.info("Update verfügbar: %s → Installation wird gestartet.", version)
+        logger.info("Update verfügbar: %s", version)
 
-        def _install_worker():
-            download_and_install_update(url, version)
-
-        root.after(
-            0,
-            lambda: messagebox.showinfo(
+        def _show_and_install():
+            messagebox.showinfo(
                 "Update",
                 f"Eine neue Version ({version}) ist verfügbar.\n"
                 "Das Update wird jetzt heruntergeladen und installiert.\n"
-                "Die App wird danach beendet.",
-            ),
-        )
-        threading.Thread(target=_install_worker, daemon=True).start()
+                "Die App wird danach beendet und neu gestartet.",
+            )
+            # Erst nach OK den Download starten, damit der
+            # taskkill den Prozess nicht vorzeitig killt.
+            def _install_worker():
+                download_and_install_update(url, version)
+
+            threading.Thread(target=_install_worker, daemon=True).start()
+
+        root.after(0, _show_and_install)
 
     if GITHUB_REPO:
         threading.Thread(target=_update_check_worker, daemon=True).start()
