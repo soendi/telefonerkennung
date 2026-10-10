@@ -32,7 +32,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.2.4"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -60,9 +60,6 @@ LOG_DIR = APPDATA_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 DB_FILE = APPDATA_DIR / "telefonbuch.db"
-
-# Marker: eine neue Instanz übernimmt und bittet diese um Beendigung.
-TAKEOVER_FILE = APPDATA_DIR / "takeover.request"
 
 # Icon-Datei (liegt neben dem Skript bzw. in der App).
 ICON_FILE = Path(__file__).resolve().with_name("telefon.ico")
@@ -1549,11 +1546,6 @@ class CallerIDApp:
         if SHUTTING_DOWN_FOR_UPDATE:
             self._really_quit()
             return
-        # Eine neue Instanz hat übernommen (Takeover-Datei):
-        # nicht ins Tray verstecken, sondern beenden.
-        if _takeover_requested():
-            self._really_quit()
-            return
         # Sonst: Fenster nur verstecken – Programm laeuft im Systray weiter.
         self._hide_to_tray()
 
@@ -2537,157 +2529,90 @@ def download_and_install_update(url, version):
 # SINGLE INSTANCE
 # ============================================================
 
-# Handle des benannten Mutex – muss lebend bleiben.
+# Handle des benannten Mutex – muss lebend bleiben, sonst wird er
+# freigegeben und eine zweite Instanz könnte ihn erneut anlegen.
 _single_instance_mutex = None
 
-WINDOW_TITLE_PREFIX = "Swisscom Telefonerkennung"
 
+def _acquire_single_instance_lock(timeout=10.0):
+    """Versucht, den Single-Instance-Mutex zu bekommen.
 
-def _find_instance_window():
-    """HWND und PID einer laufenden Instanz über den Fenstertitel finden."""
-    found = None
-    user32 = ctypes.windll.user32
+    Läuft bereits eine Instanz, wird so lange gewartet, bis sie von
+    selbst beendet ist (max. `timeout` Sekunden). Das deckt den
+    Update-Fall ab: die alte Instanz ist gerade im Begriff zu
+    sterben, die neue übernimmt. Nach Ablauf gibt es auf – die
+    zweite Instanz startet dann nicht.
 
-    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-    def _enum_proc(hwnd, _lparam):
-        nonlocal found
-        length = user32.GetWindowTextLengthW(hwnd)
-        if length:
-            buf = ctypes.create_unicode_buffer(length + 1)
-            user32.GetWindowTextW(hwnd, buf, length + 1)
-            if buf.value.startswith(WINDOW_TITLE_PREFIX):
-                pid = wintypes.DWORD()
-                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                if pid.value and pid.value != os.getpid():
-                    found = (hwnd, pid.value)
-                    return False  # Abbrechen
-        return True
-
-    user32.EnumWindows(_enum_proc, 0)
-    return found
-
-
-def _find_instance_pid():
-    """PID einer laufenden Instanz über den Fenstertitel finden."""
-    found = _find_instance_window()
-    return found[1] if found else None
-
-
-def _takeover_requested():
-    """True, wenn eine andere Instanz gerade übernehmen möchte."""
-    try:
-        pid = int(TAKEOVER_FILE.read_text().strip())
-    except (OSError, ValueError):
-        return False
-    if pid == os.getpid():
-        return False
-    # Nur glaubwürdig, wenn die anfordernde Instanz noch lebt.
-    return _pid_alive(pid)
-
-
-def _pid_alive(pid):
-    """Prüft, ob die Prozess-ID noch zu einem laufenden Prozess gehört."""
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    STILL_ACTIVE = 259
-    kernel32 = ctypes.windll.kernel32
-    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-    if not handle:
-        return False
-    try:
-        exit_code = wintypes.DWORD()
-        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-            return False
-        return exit_code.value == STILL_ACTIVE
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-def _shutdown_other_instance(hwnd, pid):
-    """Andere Instanz sauber beenden.
-
-    Zuerst WM_CLOSE schicken – die laufende Instanz beendet sich
-    selbst (DB-Transaktionen werden abgeschlossen). Erst wenn nach
-    dem Warten noch etwas übrig ist, wird hart gekillt.
+    Gibt True zurück, wenn diese Instanz weiterlaufen darf.
     """
-    # 1) Sanft: WM_CLOSE an die andere Instanz.
-    if hwnd:
-        ctypes.windll.user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
+    global _single_instance_mutex
 
-    # 2) Warten, bis sie von selbst weg ist (max. 5 s).
-    for _ in range(50):
-        if not _pid_alive(pid):
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    ERROR_ALREADY_EXISTS = 183
+    ERROR_ACCESS_DENIED = 5
+
+    deadline = time.time() + timeout
+    while True:
+        ctypes.set_last_error(0)
+        handle = kernel32.CreateMutexW(
+            None, False, "TelefonerkennungSingleInstance"
+        )
+        last_error = ctypes.get_last_error()
+
+        if handle:
+            if last_error != ERROR_ALREADY_EXISTS:
+                # Wir haben den Mutex: wir sind die einzige Instanz.
+                _single_instance_mutex = handle
+                return True
+            # Andere Instanz im gleichen Integrity-Level: Handle wieder
+            # freigeben und warten. Ohne CloseHandle bliebe der Mutex
+            # referenziert und würde erst beim Prozessende frei.
+            try:
+                kernel32.CloseHandle(handle)
+            except Exception:
+                pass
+        elif last_error == ERROR_ACCESS_DENIED:
+            # Eine ERHÖHTE Instanz (Admin) hält den Mutex, wir laufen
+            # normal und bekommen keinen Zugriff. Auch das heißt:
+            # jemand anders läuft – also warten.
+            logger.debug(
+                "Mutex von erhöhter Instanz gehalten (LastError=%s).",
+                last_error,
+            )
+        else:
+            # Anderer Fehler (z.B. ungültiger Name): Single-Instance
+            # können wir hier nicht erzwingen. Nicht blockieren, sonst
+            # startet die App gar nicht mehr.
+            logger.warning(
+                "Mutex erstellbar (LastError=%s) – Single-Instance deaktiviert.",
+                last_error,
+            )
             return True
-        time.sleep(0.1)
 
-    # 3) Hart – aber zuerst DB-Kontext abschließen lassen; die
-    #    Instanz hatte 5 s Zeit. /T räumt verbliebene Threads auf.
-    subprocess.run(
-        ["taskkill", "/PID", str(pid), "/F", "/T"],
-        capture_output=True,
-    )
-    for _ in range(20):
-        if not _pid_alive(pid):
-            break
+        if time.time() >= deadline:
+            return False
+
         time.sleep(0.1)
-    return True
 
 
 def ensure_single_instance():
     """Erzwingt, dass nur eine Instanz läuft.
 
-    Läuft bereits eine Instanz, wird diese beendet und die neue
-    Instanz läuft weiter. Der Benutzer bekommt keine Rückmeldung.
+    Die zweite Instanz wartet kurz auf die erste (Update-Fall) und
+    beendet sich dann still – ohne Rückmeldung und ohne die laufende
+    Instanz zu stören.
     """
-    global _single_instance_mutex
-
-    ERROR_ALREADY_EXISTS = 183
-    kernel32 = ctypes.windll.kernel32
-
-    _single_instance_mutex = kernel32.CreateMutexW(
-        None, False, "TelefonerkennungSingleInstance"
+    if _acquire_single_instance_lock():
+        return
+    logger.info(
+        "Weitere Instanz bereits aktiv (PID %s) – starte nicht erneut.",
+        os.getpid(),
     )
-
-    if kernel32.GetLastError() != ERROR_ALREADY_EXISTS:
-        return  # Wir sind die erste Instanz.
-
-    # Andere Instanz vorhanden: kurz warten, bis ihr Fenster
-    # existiert (auch wenn es im Tray versteckt ist), dann sanft
-    # beenden und nur im Notfall hart killen.
-    other = None
-    for _ in range(20):
-        other = _find_instance_window()
-        if other:
-            break
-        time.sleep(0.1)
-
-    if other:
-        # Takeover-Datei: die laufende Instanz erkennt daran, dass
-        # WM_CLOSE nicht "ins Tray verstecken" bedeutet, sondern
-        # "bitte sofort beenden".
-        try:
-            TAKEOVER_FILE.write_text(str(os.getpid()))
-        except OSError:
-            pass
-        _shutdown_other_instance(other[0], other[1])
-        try:
-            TAKEOVER_FILE.unlink()
-        except OSError:
-            pass
-    else:
-        # Fenster nicht gefunden – PID-Datei als Fallback.
-        pid_file = APPDATA_DIR / "instance.pid"
-        try:
-            old_pid = int(pid_file.read_text().strip())
-        except (OSError, ValueError):
-            old_pid = None
-        if old_pid and old_pid != os.getpid() and _pid_alive(old_pid):
-            _shutdown_other_instance(None, old_pid)
-
-    # Eigene PID für künftige Instanzen speichern.
-    try:
-        (APPDATA_DIR / "instance.pid").write_text(str(os.getpid()))
-    except OSError:
-        pass
+    os._exit(0)
 
 
 # ============================================================

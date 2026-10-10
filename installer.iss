@@ -18,8 +18,8 @@ SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
 CloseApplications=yes
-; RestartApplications aus: die [Code]-Sektion startet die App
-; nach der Installation selbst – sonst waeren das zwei Starts.
+; RestartApplications aus: die [Run]-Sektion startet die App nach
+; der Installation selbst – sonst waeren das zwei Starts.
 RestartApplications=no
 
 [Languages]
@@ -36,16 +36,11 @@ Name: "{autodesktop}\Telefonerkennung"; Filename: "{app}\Telefonerkennung.exe"; 
 ; Autostart mit Windows (pro Benutzer).
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Telefonerkennung"; ValueData: """{app}\Telefonerkennung.exe"""; Flags: uninsdeletevalue
 
-[Code]
-// App nach Installation IMMER starten – auch im Silent-Modus.
-// RestartApplications ist aus, und es gibt bewusst keinen [Run]-Eintrag,
-// sonst waeren das zwei Starts.
-procedure CurStepChanged(CurStep: TSetupStep);
-var
-  ResultCode: Integer;
-begin
-  if CurStep = ssPostInstall then
-  begin
-    Exec(ExpandConstant('{app}\Telefonerkennung.exe'), '', '', SW_SHOW, ewNoWait, ResultCode);
-  end;
-end;
+[Run]
+; App nach Installation starten – auch im Silent-Modus (kein
+; postinstall-Flag, sonst wird der Eintrag im Stillen übersprungen).
+; runasoriginaluser ist entscheidend: der Installer läuft erhöht,
+; und ein normales Exec würde die App ebenfalls erhöht starten.
+; Eine erhöhte Instanz wiederum ist für normale Instanzen nicht
+; mehr per Mutex erreichbar – daher kämen mehrere Instanzen zustande.
+Filename: "{app}\Telefonerkennung.exe"; Flags: nowait runasoriginaluser
