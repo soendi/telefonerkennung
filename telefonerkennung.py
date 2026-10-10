@@ -32,7 +32,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.3"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -60,6 +60,9 @@ LOG_DIR = APPDATA_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 DB_FILE = APPDATA_DIR / "telefonbuch.db"
+
+# Marker: eine neue Instanz übernimmt und bittet diese um Beendigung.
+TAKEOVER_FILE = APPDATA_DIR / "takeover.request"
 
 # Icon-Datei (liegt neben dem Skript bzw. in der App).
 ICON_FILE = Path(__file__).resolve().with_name("telefon.ico")
@@ -1501,6 +1504,12 @@ class CallerIDApp:
                         self.exit_app()
                         return
 
+                elif event[0] == "quit":
+                    # Aus einem Worker-Thread angefordert – hier
+                    # laufen wir sicher im Hauptthread.
+                    self._really_quit()
+                    return
+
         except queue.Empty:
             pass
         except Exception:
@@ -1540,11 +1549,21 @@ class CallerIDApp:
         if SHUTTING_DOWN_FOR_UPDATE:
             self._really_quit()
             return
+        # Eine neue Instanz hat übernommen (Takeover-Datei):
+        # nicht ins Tray verstecken, sondern beenden.
+        if _takeover_requested():
+            self._really_quit()
+            return
         # Sonst: Fenster nur verstecken – Programm laeuft im Systray weiter.
         self._hide_to_tray()
 
     def _really_quit(self):
-        """App vollständig beenden (kein Tray)."""
+        """App vollständig beenden (kein Tray).
+
+        Läuft bereits im Hauptthread (on_close) oder wird per
+        ui_queue-Event angefordert – niemals direkt aus einem
+        Worker-Thread heraus.
+        """
         global SHUTTING_DOWN_FOR_UPDATE
         SHUTTING_DOWN_FOR_UPDATE = True
         try:
@@ -1553,7 +1572,24 @@ class CallerIDApp:
         except Exception:
             pass
         self.stop_event.set()
-        self.root.after(100, self.root.destroy)
+        try:
+            self.root.after(100, self.root.destroy)
+        except Exception:
+            # Mainloop evtl. schon tot – hart beenden.
+            os._exit(0)
+
+    def request_quit(self):
+        """Thread-sichere Anforderung zum Beenden.
+
+        Aus Worker-Threads aufrufen – das Event wird im Hauptthread
+        über process_ui_queue verarbeitet.
+        """
+        global SHUTTING_DOWN_FOR_UPDATE
+        SHUTTING_DOWN_FOR_UPDATE = True
+        try:
+            self.ui_queue.put(("quit",))
+        except Exception:
+            os._exit(0)
 
     # --------------------------------------------------------
     # ANRUFERKENNUNG
@@ -2479,13 +2515,17 @@ def download_and_install_update(url, version):
 
         logger.info("Installer gestartet, beende App sauber.")
 
-        # App sauber beenden: Tray stoppen, Threads beenden, Fenster
-        # zerstören. Der Installer erkennt, dass die Datei frei ist,
-        # und ersetzt sie.
+        # App sauber beenden: Thread-sicher über die GUI-Queue,
+        # damit root.after im Hauptthread laeuft. Der Installer
+        # erkennt, dass die Datei frei ist, und ersetzt sie.
         if _app_instance is not None:
-            _app_instance._really_quit()
+            _app_instance.request_quit()
         else:
             os._exit(0)
+
+        # Sicherheits-Netz: Falls die GUI-Queue nicht abgearbeitet
+        # wird, nach 10s hart beenden.
+        threading.Timer(10, os._exit, args=(0,)).start()
 
     except (OSError, requests.RequestException) as e:
         logger.error("Update-Installation fehlgeschlagen: %s", e)
@@ -2503,14 +2543,14 @@ _single_instance_mutex = None
 WINDOW_TITLE_PREFIX = "Swisscom Telefonerkennung"
 
 
-def _find_instance_pid():
-    """PID einer laufenden Instanz über den Fenstertitel finden."""
-    found_pid = None
+def _find_instance_window():
+    """HWND und PID einer laufenden Instanz über den Fenstertitel finden."""
+    found = None
     user32 = ctypes.windll.user32
 
     @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     def _enum_proc(hwnd, _lparam):
-        nonlocal found_pid
+        nonlocal found
         length = user32.GetWindowTextLengthW(hwnd)
         if length:
             buf = ctypes.create_unicode_buffer(length + 1)
@@ -2519,12 +2559,77 @@ def _find_instance_pid():
                 pid = wintypes.DWORD()
                 user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
                 if pid.value and pid.value != os.getpid():
-                    found_pid = pid.value
+                    found = (hwnd, pid.value)
                     return False  # Abbrechen
         return True
 
     user32.EnumWindows(_enum_proc, 0)
-    return found_pid
+    return found
+
+
+def _find_instance_pid():
+    """PID einer laufenden Instanz über den Fenstertitel finden."""
+    found = _find_instance_window()
+    return found[1] if found else None
+
+
+def _takeover_requested():
+    """True, wenn eine andere Instanz gerade übernehmen möchte."""
+    try:
+        pid = int(TAKEOVER_FILE.read_text().strip())
+    except (OSError, ValueError):
+        return False
+    if pid == os.getpid():
+        return False
+    # Nur glaubwürdig, wenn die anfordernde Instanz noch lebt.
+    return _pid_alive(pid)
+
+
+def _pid_alive(pid):
+    """Prüft, ob die Prozess-ID noch zu einem laufenden Prozess gehört."""
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    try:
+        exit_code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return False
+        return exit_code.value == STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _shutdown_other_instance(hwnd, pid):
+    """Andere Instanz sauber beenden.
+
+    Zuerst WM_CLOSE schicken – die laufende Instanz beendet sich
+    selbst (DB-Transaktionen werden abgeschlossen). Erst wenn nach
+    dem Warten noch etwas übrig ist, wird hart gekillt.
+    """
+    # 1) Sanft: WM_CLOSE an die andere Instanz.
+    if hwnd:
+        ctypes.windll.user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
+
+    # 2) Warten, bis sie von selbst weg ist (max. 5 s).
+    for _ in range(50):
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.1)
+
+    # 3) Hart – aber zuerst DB-Kontext abschließen lassen; die
+    #    Instanz hatte 5 s Zeit. /T räumt verbliebene Threads auf.
+    subprocess.run(
+        ["taskkill", "/PID", str(pid), "/F", "/T"],
+        capture_output=True,
+    )
+    for _ in range(20):
+        if not _pid_alive(pid):
+            break
+        time.sleep(0.1)
+    return True
 
 
 def ensure_single_instance():
@@ -2546,20 +2651,28 @@ def ensure_single_instance():
         return  # Wir sind die erste Instanz.
 
     # Andere Instanz vorhanden: kurz warten, bis ihr Fenster
-    # existiert (auch wenn es im Tray versteckt ist), dann killen.
-    other_pid = None
+    # existiert (auch wenn es im Tray versteckt ist), dann sanft
+    # beenden und nur im Notfall hart killen.
+    other = None
     for _ in range(20):
-        other_pid = _find_instance_pid()
-        if other_pid:
+        other = _find_instance_window()
+        if other:
             break
         time.sleep(0.1)
 
-    if other_pid:
-        subprocess.run(
-            ["taskkill", "/PID", str(other_pid), "/F", "/T"],
-            capture_output=True,
-        )
-        time.sleep(0.3)
+    if other:
+        # Takeover-Datei: die laufende Instanz erkennt daran, dass
+        # WM_CLOSE nicht "ins Tray verstecken" bedeutet, sondern
+        # "bitte sofort beenden".
+        try:
+            TAKEOVER_FILE.write_text(str(os.getpid()))
+        except OSError:
+            pass
+        _shutdown_other_instance(other[0], other[1])
+        try:
+            TAKEOVER_FILE.unlink()
+        except OSError:
+            pass
     else:
         # Fenster nicht gefunden – PID-Datei als Fallback.
         pid_file = APPDATA_DIR / "instance.pid"
@@ -2567,12 +2680,8 @@ def ensure_single_instance():
             old_pid = int(pid_file.read_text().strip())
         except (OSError, ValueError):
             old_pid = None
-        if old_pid and old_pid != os.getpid():
-            subprocess.run(
-                ["taskkill", "/PID", str(old_pid), "/F", "/T"],
-                capture_output=True,
-            )
-            time.sleep(0.3)
+        if old_pid and old_pid != os.getpid() and _pid_alive(old_pid):
+            _shutdown_other_instance(None, old_pid)
 
     # Eigene PID für künftige Instanzen speichern.
     try:

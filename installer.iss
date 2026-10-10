@@ -18,7 +18,9 @@ SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
 CloseApplications=yes
-RestartApplications=yes
+; RestartApplications aus: die [Code]-Sektion startet die App
+; nach der Installation selbst – sonst waeren das zwei Starts.
+RestartApplications=no
 
 [Languages]
 Name: "german"; MessagesFile: "compiler:Languages\German.isl"
@@ -34,13 +36,10 @@ Name: "{autodesktop}\Telefonerkennung"; Filename: "{app}\Telefonerkennung.exe"; 
 ; Autostart mit Windows (pro Benutzer).
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Telefonerkennung"; ValueData: """{app}\Telefonerkennung.exe"""; Flags: uninsdeletevalue
 
-[Run]
-Filename: "{app}\Telefonerkennung.exe"; Description: "Telefonerkennung jetzt starten"; Flags: nowait postinstall skipifsilent
-
 [Code]
 // App nach Installation IMMER starten – auch im Silent-Modus.
-// RestartApplications reicht nicht, weil die App sich vorher
-// selbst beendet hat und der Installer sie dadurch nicht kennt.
+// RestartApplications ist aus, und es gibt bewusst keinen [Run]-Eintrag,
+// sonst waeren das zwei Starts.
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
