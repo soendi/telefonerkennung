@@ -1,4 +1,5 @@
 
+import ctypes
 import os
 import queue
 import re
@@ -11,6 +12,8 @@ import threading
 import time
 import tkinter as tk
 import xml.etree.ElementTree as ET
+
+from ctypes import wintypes
 
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -2491,10 +2494,100 @@ def download_and_install_update(url, version):
 
 
 # ============================================================
+# SINGLE INSTANCE
+# ============================================================
+
+# Handle des benannten Mutex – muss lebend bleiben.
+_single_instance_mutex = None
+
+WINDOW_TITLE_PREFIX = "Swisscom Telefonerkennung"
+
+
+def _find_instance_pid():
+    """PID einer laufenden Instanz über den Fenstertitel finden."""
+    found_pid = None
+    user32 = ctypes.windll.user32
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def _enum_proc(hwnd, _lparam):
+        nonlocal found_pid
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length:
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            if buf.value.startswith(WINDOW_TITLE_PREFIX):
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value and pid.value != os.getpid():
+                    found_pid = pid.value
+                    return False  # Abbrechen
+        return True
+
+    user32.EnumWindows(_enum_proc, 0)
+    return found_pid
+
+
+def ensure_single_instance():
+    """Erzwingt, dass nur eine Instanz läuft.
+
+    Läuft bereits eine Instanz, wird diese beendet und die neue
+    Instanz läuft weiter. Der Benutzer bekommt keine Rückmeldung.
+    """
+    global _single_instance_mutex
+
+    ERROR_ALREADY_EXISTS = 183
+    kernel32 = ctypes.windll.kernel32
+
+    _single_instance_mutex = kernel32.CreateMutexW(
+        None, False, "TelefonerkennungSingleInstance"
+    )
+
+    if kernel32.GetLastError() != ERROR_ALREADY_EXISTS:
+        return  # Wir sind die erste Instanz.
+
+    # Andere Instanz vorhanden: kurz warten, bis ihr Fenster
+    # existiert (auch wenn es im Tray versteckt ist), dann killen.
+    other_pid = None
+    for _ in range(20):
+        other_pid = _find_instance_pid()
+        if other_pid:
+            break
+        time.sleep(0.1)
+
+    if other_pid:
+        subprocess.run(
+            ["taskkill", "/PID", str(other_pid), "/F", "/T"],
+            capture_output=True,
+        )
+        time.sleep(0.3)
+    else:
+        # Fenster nicht gefunden – PID-Datei als Fallback.
+        pid_file = APPDATA_DIR / "instance.pid"
+        try:
+            old_pid = int(pid_file.read_text().strip())
+        except (OSError, ValueError):
+            old_pid = None
+        if old_pid and old_pid != os.getpid():
+            subprocess.run(
+                ["taskkill", "/PID", str(old_pid), "/F", "/T"],
+                capture_output=True,
+            )
+            time.sleep(0.3)
+
+    # Eigene PID für künftige Instanzen speichern.
+    try:
+        (APPDATA_DIR / "instance.pid").write_text(str(os.getpid()))
+    except OSError:
+        pass
+
+
+# ============================================================
 # START
 # ============================================================
 
 if __name__ == "__main__":
+    ensure_single_instance()
+
     migrate_legacy_db()
     init_db()
     cleanup_old_call_logs()
