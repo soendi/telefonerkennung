@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-#define MyAppVersion "3.2.6"
+#define MyAppVersion "3.2.7"
 #endif
 
 [Setup]
@@ -43,10 +43,10 @@ Name: "{autodesktop}\Telefonerkennung"; Filename: "{app}\Telefonerkennung.exe"; 
 Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Telefonerkennung"; ValueData: """{app}\Telefonerkennung.exe"""; Flags: uninsdeletevalue
 
 [Run]
-; App nach Installation starten – auch im Silent-Modus (kein
-; postinstall-Flag, sonst wird der Eintrag im Stillen übersprungen).
-; runasoriginaluser NICHT gesetzt: Installer läuft als Admin, App startet als Admin.
-Filename: "{app}\Telefonerkennung.exe"; Flags: nowait postinstall skipifsilent
+; App nach Installation starten – AUCH im Silent-Modus.
+; runasoriginaluser: App als Original-User starten (nicht als Admin).
+; OHNE skipifsilent: Eintrag wird AUCH im Silent-Modus ausgeführt.
+Filename: "{app}\Telefonerkennung.exe"; Flags: nowait postinstall runasoriginaluser
 
 [Code]
 function InitializeSetup(): Boolean;
