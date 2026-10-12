@@ -27,16 +27,8 @@ jobs:
 
       - name: Build executable
         run: |
-          # Python-DLL explizit einbinden (Fix: "failed to load pythondll")
-          # DLL-Name dynamisch ermitteln (python312.dll, python311.dll, etc.)
-          $pythonExe = (Get-Command python).Source
-          $pythonDllDir = Split-Path $pythonExe
-          $dllFiles = Get-ChildItem $pythonDllDir -Filter "python*.dll" | Where-Object { $_.Name -match '^python\d+\.dll$' }
-          $addBinaryArgs = @()
-          foreach ($dll in $dllFiles) {
-            $addBinaryArgs += "--add-binary", "$($dll.FullName);."
-          }
-          pyinstaller --onefile --windowed --icon=telefon.ico --name Telefonerkennung $addBinaryArgs telefonerkennung.py
+          # Spec-File nutzen (zuverlässigere DLL-Einbindung)
+          pyinstaller Telefonerkennung.spec
 
       - name: Install Inno Setup
         run: choco install innosetup -y
