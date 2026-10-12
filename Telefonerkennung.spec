@@ -5,7 +5,8 @@ import os
 from pathlib import Path
 
 # Spec-File für --onedir Modus (KEIN onefile!)
-# Das vermeidet ALLE Temp-Verzeichnis-Probleme und DLL-Fehler komplett.
+# Erstellt einen Ordner mit allen Dateien statt einer einzelnen EXE.
+# Vermeidet ALLE Temp-Verzeichnis-Probleme und DLL-Fehler komplett.
 # PyInstaller verwaltet python312.dll automatisch.
 
 block_cipher = None
@@ -39,25 +40,37 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 
-# --onedir Modus: COLLECT statt EXE
-# Erstellt einen Ordner mit allen Dateien statt einer einzelnen EXE
-coll = COLLECT(
+# EXE für das Hauptprogramm (erforderlich für COLLECT)
+exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
+    [],
+    exclude_binaries=True,
     name='Telefonerkennung',
     debug=False,
+    bootloader_ignore_signals=False,
     strip=False,
     upx=False,  # UPX deaktiviert - verhindert DLL-Korruption
-    upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='telefon.ico',
+)
+
+# COLLECT für --onedir Modus: sammelt alle Dateien in einen Ordner
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='Telefonerkennung',
+    debug=False,
+    console=False,
     icon='telefon.ico',
 )
