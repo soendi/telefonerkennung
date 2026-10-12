@@ -32,7 +32,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "1.2.4"
+APP_VERSION = "1.2.5"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -353,7 +353,7 @@ def get_call_logs(limit=500):
         return db.execute("""
             SELECT display_number, name, started_at, duration_s
             FROM call_log
-            ORDER BY id DESC
+            ORDER BY started_at DESC
             LIMIT ?
         """, (limit,)).fetchall()
 
@@ -552,8 +552,19 @@ def create_tray_image():
 
 
 # ============================================================
-# TOAST-FENSTER
-# ============================================================
+# Status-Werte, die auf einen aktiven Anruf hinweisen (klingelnd ODER verbunden).
+# Swisscom Enterprise zeigt die Nummer während des gesamten Gesprächs an,
+# der Status wechselt dabei (z. B. "Ankommender Anruf" → "Verbunden" / "Aktiv").
+ACTIVE_CALL_STATUSES = {
+    "Ankommender Anruf",
+    "Verbunden",
+    "Aktiv",
+    "Im Gespräch",
+    "Gespräch",
+    "Connected",
+    "Active",
+    "In Call",
+}
 
 class CallToast:
     def __init__(self, root):
@@ -561,11 +572,29 @@ class CallToast:
         self.window = tk.Toplevel(root)
         self.window.withdraw()
         self.window.overrideredirect(True)
+        # -topmost allein reicht manchmal nicht über Action Center.
+        # Wir setzen zusätzlich per Win32 HWND_TOPMOST.
         self.window.wm_attributes("-topmost", True)
+        self._force_topmost()
         self.window.configure(bg="#1e1e1e")
         self.window.minsize(400, 0)
         self.window.maxsize(400, 99999)
         set_window_icon(self.window)
+
+    def _force_topmost(self):
+        """Erzwicht echtes Topmost auch über Action Center / Shell."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            hwnd = ctypes.windll.user32.GetParent(self.window.winfo_id())
+            if not hwnd:
+                hwnd = self.window.winfo_id()
+            # HWND_TOPMOST = -1, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE = 0x0013
+            ctypes.windll.user32.SetWindowPos(
+                hwnd, -1, 0, 0, 0, 0, 0x0013
+            )
+        except Exception:
+            pass
 
         frame = tk.Frame(self.window, bg="#1e1e1e")
         frame.pack(fill="both", expand=True)
@@ -698,6 +727,7 @@ class CallToast:
         self._calc_target()
         self.window.deiconify()
         self.window.lift()
+        self._force_topmost()
         self._start_ticker()
         self._animate_in()
 
@@ -887,7 +917,7 @@ def get_incoming_call():
             except Exception:
                 continue
 
-        if status != "Ankommender Anruf" or panel is None:
+        if status not in ACTIVE_CALL_STATUSES or panel is None:
             return None
 
         texts = []
@@ -1167,6 +1197,8 @@ class CallerIDApp:
     def build_ui(self):
         self.tabs = ttk.Notebook(self.root)
         self.tabs.pack(fill="both", expand=True, padx=10, pady=10)
+        # Beim Tab-Wechsel: Anrufprotokoll-Sortierung auf "Zeit" zurücksetzen
+        self.tabs.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         # TAB: Aktueller Anruf
         self.call_tab = ttk.Frame(self.tabs, padding=20)
@@ -1441,21 +1473,24 @@ class CallerIDApp:
         log_frame = ttk.Frame(self.log_tab)
         log_frame.pack(fill="both", expand=True)
 
+        # Spalten: Datum (dd.mm.jjjj), Zeit (hh:mm), Nummer, Name, Dauer (mm:ss)
         self.log_tree = ttk.Treeview(
             log_frame,
-            columns=("number", "name", "date", "duration"),
+            columns=("date", "time", "number", "name", "duration"),
             show="headings",
             selectmode="browse",
         )
 
-        self.log_tree.heading("number", text="Telefonnummer")
-        self.log_tree.heading("name", text="Name")
-        self.log_tree.heading("date", text="Datum")
-        self.log_tree.heading("duration", text="Dauer")
+        self.log_tree.heading("date", text="Datum", command=lambda: self._sort_log_tree("date"))
+        self.log_tree.heading("time", text="Zeit", command=lambda: self._sort_log_tree("time"))
+        self.log_tree.heading("number", text="Telefonnummer", command=lambda: self._sort_log_tree("number"))
+        self.log_tree.heading("name", text="Name", command=lambda: self._sort_log_tree("name"))
+        self.log_tree.heading("duration", text="Dauer", command=lambda: self._sort_log_tree("duration"))
 
-        self.log_tree.column("number", width=160)
-        self.log_tree.column("name", width=260)
-        self.log_tree.column("date", width=160)
+        self.log_tree.column("date", width=120, anchor="center")
+        self.log_tree.column("time", width=70, anchor="center")
+        self.log_tree.column("number", width=150)
+        self.log_tree.column("name", width=220)
         self.log_tree.column("duration", width=80, anchor="e")
 
         log_scroll = ttk.Scrollbar(
@@ -1464,6 +1499,10 @@ class CallerIDApp:
             command=self.log_tree.yview,
         )
         self.log_tree.configure(yscrollcommand=log_scroll.set)
+
+        # Sortier-Status merken: Standard nach Datum+Zeit absteigend
+        self._log_sort_column = "date"
+        self._log_sort_desc = True
 
         self.log_tree.pack(side="left", fill="both", expand=True)
         log_scroll.pack(side="right", fill="y")
@@ -1528,6 +1567,13 @@ class CallerIDApp:
             GUI_QUEUE_INTERVAL_MS,
             self.process_ui_queue,
         )
+
+    def _on_tab_changed(self, event):
+        """Bei Tab-Wechsel: Anrufprotokoll-Sortierung auf 'Datum' zurücksetzen."""
+        if self.tabs.select() == str(self.log_tab):
+            self._log_sort_column = "date"
+            self._log_sort_desc = True
+            self.refresh_call_log()
 
     def poll_worker(self):
         """Liest die Swisscom-Oberfläche ausserhalb des GUI-Threads."""
@@ -2304,15 +2350,25 @@ class CallerIDApp:
         self.refresh_call_log()
 
     def refresh_call_log(self):
+        """Aktualisiert das Anrufprotokoll und wendet die aktuelle Sortierung an."""
         for item in self.log_tree.get_children():
             self.log_tree.delete(item)
 
-        for row in get_call_logs():
+        rows = list(get_call_logs())
+        rows.sort(key=self._log_sort_key, reverse=self._log_sort_desc)
+
+        for row in rows:
+            started = row["started_at"]
+            # Datum: dd.mm.jjjj
+            date_part = started[8:10] + "." + started[5:7] + "." + started[0:4] if len(started) >= 10 else started
+            # Zeit: hh:mm
+            time_part = started[11:16] if len(started) >= 16 else ""
+
             minutes, seconds = divmod(row["duration_s"], 60)
             hours, minutes = divmod(minutes, 60)
 
             if hours:
-                duration_text = f"{hours}:{minutes:02d}:{seconds:02d}"
+                duration_text = f"{hours * 60 + minutes}:{seconds:02d}"
             else:
                 duration_text = f"{minutes}:{seconds:02d}"
 
@@ -2320,12 +2376,38 @@ class CallerIDApp:
                 "",
                 "end",
                 values=(
+                    date_part,      # dd.mm.jjjj
+                    time_part,      # hh:mm
                     row["display_number"],
                     row["name"],
-                    row["started_at"],
                     duration_text,
                 ),
             )
+
+    def _log_sort_key(self, row):
+        """Sortierschlüssel für die angegebene Spalte."""
+        col = self._log_sort_column
+        if col == "date":
+            return row["started_at"]
+        if col == "time":
+            return row["started_at"]
+        if col == "number":
+            return row["display_number"] or ""
+        if col == "name":
+            return (row["name"] or "").lower()
+        if col == "duration":
+            return row["duration_s"]
+        return row["started_at"]
+
+    def _sort_log_tree(self, column):
+        """Kopfklick: Spalte sortieren, Richtung umschalten."""
+        if self._log_sort_column == column:
+            self._log_sort_desc = not self._log_sort_desc
+        else:
+            self._log_sort_column = column
+            # Standard: Zeit absteigend, sonst aufsteigend
+            self._log_sort_desc = column == "time"
+        self.refresh_call_log()
 
 
 # ============================================================
