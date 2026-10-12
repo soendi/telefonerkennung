@@ -27,25 +27,8 @@ jobs:
 
       - name: Build executable
         run: |
-          # Spec-File nutzen (zuverlässige DLL-Einbindung)
+          # Spec-File nutzen (python312.dll eingebettet, UPX deaktiviert)
           pyinstaller Telefonerkennung.spec
-          # python312.dll für Installer separat bereitstellen (neben EXE im App-Ordner)
-          $pythonExe = (Get-Command python).Source
-          $pythonDll = Join-Path (Split-Path $pythonExe) "python312.dll"
-          if (Test-Path $pythonDll) {
-            Copy-Item $pythonDll -Destination "dist\python312.dll" -Force
-            Write-Host "python312.dll nach dist kopiert: $pythonDll"
-          } else {
-            # Fallback: in Python-Installationsverzeichnis suchen
-            $altDll = Join-Path $env:PYTHON_HOME "python312.dll"
-            if (Test-Path $altDll) {
-              Copy-Item $altDll -Destination "dist\python312.dll" -Force
-              Write-Host "python312.dll aus PYTHON_HOME kopiert: $altDll"
-            } else {
-              Write-Error "python312.dll nicht gefunden! Weder bei python.exe noch in PYTHON_HOME."
-              exit 1
-            }
-          }
 
       - name: Install Inno Setup
         run: choco install innosetup -y
