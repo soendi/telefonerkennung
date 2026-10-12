@@ -32,7 +32,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "1.2.5"
+APP_VERSION = "1.2.6"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -573,26 +573,23 @@ class CallToast:
         self.window.withdraw()
         self.window.overrideredirect(True)
         # -topmost allein reicht manchmal nicht über Action Center.
-        # Wir setzen zusätzlich per Win32 HWND_TOPMOST.
+        # _force_topmost() wird erst in show() aufgerufen, wenn Fenster sichtbar.
         self.window.wm_attributes("-topmost", True)
-        self._force_topmost()
         self.window.configure(bg="#1e1e1e")
         self.window.minsize(400, 0)
         self.window.maxsize(400, 99999)
         set_window_icon(self.window)
 
     def _force_topmost(self):
-        """Erzwicht echtes Topmost auch über Action Center / Shell."""
+        """Erzwingt echtes Topmost auch über Action Center / Shell.
+        Nur aufrufen, wenn Fenster bereits sichtbar (deiconify)."""
         try:
             import ctypes
-            from ctypes import wintypes
             hwnd = ctypes.windll.user32.GetParent(self.window.winfo_id())
             if not hwnd:
                 hwnd = self.window.winfo_id()
             # HWND_TOPMOST = -1, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE = 0x0013
-            ctypes.windll.user32.SetWindowPos(
-                hwnd, -1, 0, 0, 0, 0, 0x0013
-            )
+            ctypes.windll.user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0013)
         except Exception:
             pass
 
