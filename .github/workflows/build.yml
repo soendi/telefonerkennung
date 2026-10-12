@@ -25,7 +25,7 @@ jobs:
         run: |
           pip install pyinstaller pystray pillow pywinauto requests comtypes
 
-- name: Build executable
+      - name: Build executable
         run: |
           # Spec-File nutzen (zuverlässige DLL-Einbindung)
           pyinstaller Telefonerkennung.spec
