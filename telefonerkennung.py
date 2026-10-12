@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.8"
+APP_VERSION = "3.2.9"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -649,6 +649,9 @@ class CallToast:
         self._original_name = ""
         self._edited_name = None
         self._editing = False
+        self._visible = False
+        self._connected = False
+        self._title_prefix = "Eingehender Anruf"
 
         for widget in (frame, content, self.title_label,
                        self.number_label):
@@ -723,6 +726,7 @@ class CallToast:
         self._edited_name = None
         self._original_name = name or "Unbekannter Anrufer"
         self._current_number = number or ""
+        self._visible = True
         self._connected = status is not None and status != "Ankommender Anruf"
         self._title_prefix = "Verbunden" if self._connected else "Eingehender Anruf"
 
@@ -760,6 +764,8 @@ class CallToast:
         """Stellt sicher, dass ein aktiver Toast sichtbar an der
         Zielposition steht (Fallback falls Animation hängt)."""
         try:
+            if not getattr(self, "_visible", False):
+                return
             if not self._current_number:
                 return
             self.window.geometry(f"+{self._target_x}+{self._target_y}")
@@ -816,6 +822,7 @@ class CallToast:
         self.name_label.config(text=name or "Unbekannter Anrufer")
 
     def hide(self):
+        self._visible = False
         self._stop_ticker()
 
         # Editierten Namen speichern, bevor das Fenster schliesst.
@@ -1086,6 +1093,9 @@ class CallerIDApp:
         self.call_started_at = None
         self.call_log_name = ""
         self.call_log_number = ""
+        # Zähler für aufeinanderfolgende Leer-Polls: Erst nach 2x None
+        # gilt ein Anruf als wirklich beendet (Schutz vor Lese-Aussetzern).
+        self._none_count = 0
 
         # Testmodus für simulierte Anrufe.
         self.test_mode = False
@@ -1792,13 +1802,25 @@ class CallerIDApp:
         logger.info(f"TRACE: process_call aufgerufen: call={call}, test_mode={getattr(self, 'test_mode', 'N/A')}")
 
         if call is None:
-            if self.last_call_id is not None:
-                # Anruf nicht mehr aktiv: Anzeige und Toast ausblenden.
-                logger.info("TRACE: process_call(None) – Anruf beendet, blende Toast aus")
-                self._log_call_end()
-                self.set_call_display("Warte auf eingehenden Anruf ...")
-                self.toast.hide()
-                logger.info("TRACE: toast.hide() ausgeführt")
+            # Im Testmodus beendet nur end_test_call() den Anruf –
+            # einzelne Leer-Polls dürfen den Toast nicht killen.
+            if self.test_mode:
+                return
+            if self.last_call_id is None:
+                self._none_count = 0
+                return
+            # Erst nach 2x None in Folge gilt der Anruf als beendet
+            # (Schutz vor einzelnen Lese-Aussetzern der Swisscom-App).
+            self._none_count += 1
+            if self._none_count < 2:
+                return
+            self._none_count = 0
+            # Anruf nicht mehr aktiv: Anzeige und Toast ausblenden.
+            logger.info("TRACE: process_call(None) – Anruf beendet, blende Toast aus")
+            self._log_call_end()
+            self.set_call_display("Warte auf eingehenden Anruf ...")
+            self.toast.hide()
+            logger.info("TRACE: toast.hide() ausgeführt")
 
             self.last_call_id = None
             return
@@ -1808,6 +1830,7 @@ class CallerIDApp:
         status = call.get("status")
         normalized = normalize_phone(number)
         call_id = (normalized, name)
+        self._none_count = 0
 
         if call_id == self.last_call_id:
             # Gleicher Anruf, evtl. neuer Status (Klingeln -> Verbunden):
