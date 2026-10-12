@@ -32,7 +32,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -1068,7 +1068,7 @@ class CallerIDApp:
         self.ui_queue.put(("tray", "exit"))
 
     def on_tray_test(self):
-        print("TEST: on_tray_test aufgerufen")
+        logger.info("TEST: on_tray_test aufgerufen")
         self.ui_queue.put(("tray", "test"))
 
     def on_tray_update_check(self):
@@ -1112,9 +1112,9 @@ class CallerIDApp:
         threading.Thread(target=_worker, daemon=True).start()
 
     def simulate_call(self):
-        print(f"TEST: simulate_call aufgerufen, test_mode={self.test_mode}")
+        logger.info(f"TEST: simulate_call aufgerufen, test_mode={self.test_mode}")
         if self.test_mode:
-            print("TEST: test_mode bereits aktiv, breche ab")
+            logger.info("TEST: test_mode bereits aktiv, breche ab")
             return
 
         self.test_mode = True
@@ -1122,25 +1122,25 @@ class CallerIDApp:
             "name": "Unbekannter Anrufer",
             "nummer": "+41817564572",
         }
-        print(f"TEST: test_mode gesetzt, Daten={self.test_call_data}")
+        logger.info(f"TEST: test_mode gesetzt, Daten={self.test_call_data}")
 
         # Testanruf nach 15 Sekunden automatisch beenden.
         self.root.after(15000, self.end_test_call)
-        print("TEST: after(15000, end_test_call) gesetzt")
+        logger.info("TEST: after(15000, end_test_call) gesetzt")
 
     def end_test_call(self):
-        print("TEST: end_test_call – Testanruf wird beendet (test_mode=False)")
+        logger.info("TEST: end_test_call – Testanruf wird beendet (test_mode=False)")
         self.test_mode = False
         self.test_call_data = None
 
-        # Toast direkt ausblenden (läuft im GUI-Thread via root.after).
+        # Toast direkt ausblenden (läuft im GUI-Thread via root_after).
         if self.last_call_id is not None:
-            print("TRACE: blende Toast direkt nach Testende aus")
+            logger.info("TRACE: blende Toast direkt nach Testende aus")
             self._log_call_end()
             self.set_call_display("Warte auf eingehenden Anruf ...")
             self.toast.hide()
             self.last_call_id = None
-            print("TRACE: toast.hide() ausgeführt")
+            logger.info("TRACE: toast.hide() ausgeführt")
 
     def show_settings(self):
         self._show_from_tray()
@@ -1682,17 +1682,16 @@ class CallerIDApp:
         self.call_started_at = None
 
     def process_call(self, call):
-        print(f"TRACE: process_call aufgerufen: call={call}, test_mode={getattr(self, 'test_mode', 'N/A')}")
+        logger.info(f"TRACE: process_call aufgerufen: call={call}, test_mode={getattr(self, 'test_mode', 'N/A')}")
 
         if call is None:
             if self.last_call_id is not None:
                 # Anruf nicht mehr aktiv: Anzeige und Toast ausblenden.
-                print("TRACE: process_call(None) – Anruf beendet, "
-                      "blende Toast aus")
+                logger.info("TRACE: process_call(None) – Anruf beendet, blende Toast aus")
                 self._log_call_end()
                 self.set_call_display("Warte auf eingehenden Anruf ...")
                 self.toast.hide()
-                print("TRACE: toast.hide() ausgeführt")
+                logger.info("TRACE: toast.hide() ausgeführt")
 
             self.last_call_id = None
             return
