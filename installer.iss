@@ -27,6 +27,7 @@ Name: "german"; MessagesFile: "compiler:Languages\German.isl"
 
 [Files]
 Source: "dist\Telefonerkennung.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\python312.dll"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Telefonerkennung"; Filename: "{app}\Telefonerkennung.exe"; IconFilename: "{app}\Telefonerkennung.exe"

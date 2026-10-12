@@ -4,26 +4,16 @@ import sys
 import os
 from pathlib import Path
 
-# Python-DLL(s) finden - explizit im Installationsverzeichnis suchen
-python_dll_dir = Path(sys.executable).parent
-python_dlls = list(python_dll_dir.glob("python*.dll"))
-
-# Fallback: Falls keine DLLs gefunden, in sys.prefix suchen
-if not python_dlls:
-    python_dll_dir = Path(sys.prefix)
-    python_dlls = list(python_dll_dir.glob("python*.dll"))
-    print(f"PyInstaller: Fallback - Python-DLL-Verzeichnis: {python_dll_dir}")
-
-# Debug: Welche DLLs wurden gefunden?
-print(f"PyInstaller: Python-DLLs gefunden: {[dll.name for dll in python_dlls]}")
-print(f"PyInstaller: Python-DLL-Verzeichnis: {python_dll_dir}")
+# Spec-File OHNE Python-DLL im Bundle
+# Die python312.dll wird separat vom Installer ins App-Verzeichnis kopiert
+# Das vermeidet Temp-Verzeichnis-Konflikte bei Updates
 
 block_cipher = None
 
 a = Analysis(
     ['telefonerkennung.py'],
     pathex=[],
-    binaries=[(str(dll), '.') for dll in python_dlls],
+    binaries=[],  # KEINE python312.dll im Bundle
     datas=[
         ('telefon.ico', '.'),
     ],
@@ -60,8 +50,8 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,                    # UPX deaktivieren: komprimiert python312.dll korrupt
-    upx_exclude=['python*.dll'],  # Sicherheitshalber auch explizit ausschliessen
+    upx=False,
+    upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
