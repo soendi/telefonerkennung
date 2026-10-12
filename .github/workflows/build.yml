@@ -67,4 +67,5 @@ jobs:
           files: |
             installer/Telefonerkennung-Setup-*.exe
             dist/Telefonerkennung-*.exe
+            dist/Telefonerkennung-*.zip
           generate_release_notes: true
