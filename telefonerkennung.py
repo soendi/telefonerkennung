@@ -32,7 +32,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.1.15"
+APP_VERSION = "3.1.17"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -2594,7 +2594,7 @@ def parse_version(text):
 def check_for_update():
     """Prüft GitHub nach einer neueren Version.
 
-    Gibt (version, installer_url) zurück oder None.
+    Gibt (version, exe_url) zurück oder None.
     """
     if not GITHUB_REPO:
         return None
@@ -2614,85 +2614,43 @@ def check_for_update():
     if parse_version(tag) <= parse_version(APP_VERSION):
         return None
 
-    # Passendes Installer-Asset suchen.
-    installer_url = None
+    # EXE-Asset suchen (Telefonerkennung-<version>.exe).
+    exe_url = None
+    expected_name = f"Telefonerkennung-{tag}.exe"
     for asset in data.get("assets", []):
-        name = (asset.get("name") or "").lower()
-        if name.endswith(".exe") or name.endswith(".msi"):
-            installer_url = asset.get("browser_download_url")
+        if asset.get("name") == expected_name:
+            exe_url = asset.get("browser_download_url")
             break
 
-    if not installer_url:
-        logger.warning("Update %s gefunden, aber kein Installer-Asset.", tag)
+    if not exe_url:
+        logger.warning("Update %s gefunden, aber kein EXE-Asset (%s).", tag, expected_name)
         return None
 
-    return tag, installer_url
+    return tag, exe_url
 
 
-def download_and_install_update(url, version):
-    """Lädt den Installer herunter, extrahiert die EXE und nutzt
-    einen separaten Updater-Prozess für das Update.
+def download_and_install_update(exe_url, version):
+    """Lädt die neue EXE direkt herunter und nutzt einen separaten
+    Updater-Prozess für das Update.
 
-    Vermeidet das DLL-Problem beim Update, da der Updater die
-    alte Instanz wartet, die EXE ersetzt und die neue Version startet.
+    Vermeidet DLL-Probleme und Installer-Konflikte komplett.
     """
     global SHUTTING_DOWN_FOR_UPDATE
     try:
-        resp = requests.get(url, stream=True, timeout=120)
+        resp = requests.get(exe_url, stream=True, timeout=120)
         resp.raise_for_status()
 
-        suffix = ".msi" if url.lower().endswith(".msi") else ".exe"
-        installer_path = Path(tempfile.gettempdir()) / (
-            f"telefonerkennung-setup-{version}{suffix}"
-        )
+        exe_path = Path(tempfile.gettempdir()) / f"Telefonerkennung-{version}.exe"
 
-        with open(installer_path, "wb") as f:
+        with open(exe_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-        logger.info("Installer heruntergeladen: %s", installer_path)
-
-        # Inno Setup Installer entpacken (/extract) um an die EXE zu kommen
-        extract_dir = Path(tempfile.gettempdir()) / f"telefonerkennung-extract-{version}"
-        if extract_dir.exists():
-            shutil.rmtree(extract_dir, ignore_errors=True)
-        extract_dir.mkdir(parents=True, exist_ok=True)
-
-        logger.info("Entpacke Installer nach %s", extract_dir)
-        if suffix == ".msi":
-            subprocess.run(
-                ["msiexec", "/a", str(installer_path), "/qn", f"TARGETDIR={extract_dir}"],
-                check=True, timeout=60
-            )
-        else:
-            subprocess.run(
-                [str(installer_path), f"/DIR={extract_dir}", "/VERYSILENT", "/NORESTART"],
-                check=True, timeout=60
-            )
-
-        # EXE im entpackten Ordner finden
-        extracted_exe = None
-        for root, dirs, files in os.walk(extract_dir):
-            for f in files:
-                if f.lower() == "telefonerkennung.exe":
-                    extracted_exe = Path(root) / f
-                    break
-            if extracted_exe:
-                break
-
-        if not extracted_exe or not extracted_exe.exists():
-            logger.error("EXE nach Entpacken nicht gefunden")
-            return False
-
-        logger.info("EXE extrahiert: %s", extracted_exe)
+        logger.info("EXE heruntergeladen: %s", exe_path)
 
         # Ziel-EXE im Installationsverzeichnis
         target_exe = Path(sys.executable)
-        if getattr(sys, 'frozen', False):
-            # Wir laufen als PyInstaller EXE
-            target_exe = Path(sys.executable)
-        else:
-            # Entwicklungsumgebung
+        if not getattr(sys, 'frozen', False):
             target_exe = Path(__file__).with_name("Telefonerkennung.exe")
 
         # Updater-Script im Temp-Verzeichnis ablegen
@@ -2711,7 +2669,7 @@ def download_and_install_update(url, version):
             [
                 sys.executable, str(updater_path),
                 "--old-pid", str(os.getpid()),
-                "--new-exe", str(extracted_exe),
+                "--new-exe", str(exe_path),
                 "--target-exe", str(target_exe),
                 "--working-dir", str(target_exe.parent)
             ],
@@ -2721,6 +2679,7 @@ def download_and_install_update(url, version):
         logger.info("Updater gestartet, beende App sauber.")
 
         # Flag setzen: on_close beendet die App wirklich
+        global SHUTTING_DOWN_FOR_UPDATE
         SHUTTING_DOWN_FOR_UPDATE = True
         if _app_instance is not None:
             _app_instance.request_quit()

@@ -17,10 +17,10 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
-CloseApplications=yes
-; RestartApplications aus: die [Run]-Sektion startet die App nach
-; der Installation selbst – sonst waeren das zwei Starts.
-RestartApplications=no
+; CloseApplications entfernt: Unser Updater-Prozess kümmert sich um
+; den EXE-Austausch ohne Installer-Eingriff.
+; CloseApplications=yes
+; RestartApplications=no
 
 [Languages]
 Name: "german"; MessagesFile: "compiler:Languages\German.isl"

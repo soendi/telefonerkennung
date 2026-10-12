@@ -30,6 +30,12 @@ jobs:
           # Spec-File nutzen (python312.dll eingebettet, UPX deaktiviert)
           pyinstaller Telefonerkennung.spec
 
+      - name: Prepare release assets
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          # Raw EXE für Updates kopieren
+          Copy-Item "dist\Telefonerkennung.exe" "dist\Telefonerkennung-$version.exe"
+
       - name: Install Inno Setup
         run: choco install innosetup -y
 
@@ -42,8 +48,10 @@ jobs:
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload release asset
+      - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: installer/Telefonerkennung-Setup-*.exe
+          files: |
+            installer/Telefonerkennung-Setup-*.exe
+            dist/Telefonerkennung-*.exe
           generate_release_notes: true
