@@ -27,7 +27,17 @@ jobs:
 
       - name: Build executable
         run: |
-          pyinstaller --onefile --windowed --icon=telefon.ico --name Telefonerkennung telefonerkennung.py
+          # Python-DLL explizit einbinden (Fix: "failed to load pythondll")
+          $pythonDll = (Get-Command python).Source
+          $pythonDllDir = Split-Path $pythonDll
+          $dllName = "python312.dll"
+          $dllPath = Join-Path $pythonDllDir $dllName
+          if (Test-Path $dllPath) {
+            pyinstaller --onefile --windowed --icon=telefon.ico --name Telefonerkennung --add-binary "$dllPath;." telefonerkennung.py
+          } else {
+            Write-Warning "DLL $dllPath nicht gefunden, baue ohne explizites Einbinden"
+            pyinstaller --onefile --windowed --icon=telefon.ico --name Telefonerkennung telefonerkennung.py
+          }
 
       - name: Install Inno Setup
         run: choco install innosetup -y
