@@ -34,11 +34,6 @@ jobs:
       - name: Prepare release assets
         run: |
           $version = "${{ github.ref_name }}".TrimStart("v")
-          # onedir build: dist/Telefonerkennung Ordner ist die App
-          # ZIP für Updates erstellen
-          Compress-Archive -Path "dist\Telefonerkennung\*" -DestinationPath "dist\Telefonerkennung-$version.zip" -Force
-          # Auch die EXE direkt für Updates verfügbar machen
-          Copy-Item "dist\Telefonerkennung\Telefonerkennung.exe" "dist\Telefonerkennung-$version.exe" -Force
 
       - name: Install Inno Setup
         run: choco install innosetup -y
@@ -55,8 +50,5 @@ jobs:
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            installer/Telefonerkennung-Setup-*.exe
-            dist/Telefonerkennung-*.exe
-            dist/Telefonerkennung-*.zip
+          files: installer/Telefonerkennung-Setup-*.exe
           generate_release_notes: true
