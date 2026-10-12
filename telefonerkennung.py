@@ -2594,7 +2594,7 @@ def parse_version(text):
 def check_for_update():
     """Prüft GitHub nach einer neueren Version.
 
-    Gibt (version, exe_url) zurück oder None.
+    Gibt (version, installer_url) zurück oder None.
     """
     if not GITHUB_REPO:
         return None
@@ -2614,69 +2614,74 @@ def check_for_update():
     if parse_version(tag) <= parse_version(APP_VERSION):
         return None
 
-    # EXE-Asset suchen (Telefonerkennung-<version>.exe).
-    exe_url = None
-    expected_name = f"Telefonerkennung-{tag}.exe"
+    # Installer-Asset suchen (Telefonerkennung-Setup-<version>.exe).
+    installer_url = None
+    expected_name = f"Telefonerkennung-Setup-{tag}.exe"
     for asset in data.get("assets", []):
         if asset.get("name") == expected_name:
-            exe_url = asset.get("browser_download_url")
+            installer_url = asset.get("browser_download_url")
             break
 
-    if not exe_url:
-        logger.warning("Update %s gefunden, aber kein EXE-Asset (%s).", tag, expected_name)
+    if not installer_url:
+        logger.warning("Update %s gefunden, aber kein Installer-Asset (%s).", tag, expected_name)
         return None
 
-    return tag, exe_url
+    return tag, installer_url
 
 
-def download_and_install_update(exe_url, version):
-    """Lädt die neue EXE direkt herunter und nutzt einen separaten
-    Updater-Prozess für das Update.
+def download_and_install_update(installer_url, version):
+    """Lädt den Installer herunter und startet ihn mit einem BAT-File
+    für den Neustart (wie FerdlWorks).
 
-    Vermeidet DLL-Probleme und Installer-Konflikte komplett.
+    Der Installer läuft mit /SILENT /SUPPRESSMSGBOXES /NORESTART.
+    Ein BAT-File wartet, bis die App beendet ist, führt den Installer aus
+    und startet die App neu.
     """
     global SHUTTING_DOWN_FOR_UPDATE
     try:
-        resp = requests.get(exe_url, stream=True, timeout=120)
+        resp = requests.get(installer_url, stream=True, timeout=120)
         resp.raise_for_status()
 
-        exe_path = Path(tempfile.gettempdir()) / f"Telefonerkennung-{version}.exe"
+        suffix = ".exe"
+        installer_path = Path(tempfile.gettempdir()) / f"Telefonerkennung-Setup-{version}{suffix}"
 
-        with open(exe_path, "wb") as f:
+        with open(installer_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-        logger.info("EXE heruntergeladen: %s", exe_path)
+        logger.info("Installer heruntergeladen: %s", installer_path)
 
         # Ziel-EXE im Installationsverzeichnis
         target_exe = Path(sys.executable)
         if not getattr(sys, 'frozen', False):
             target_exe = Path(__file__).with_name("Telefonerkennung.exe")
 
-        # Updater-Script im Temp-Verzeichnis ablegen
-        updater_path = Path(tempfile.gettempdir()) / f"updater-{version}.py"
-        with open(updater_path, "w", encoding="utf-8") as f:
-            f.write(UPDATER_SCRIPT)
+        # BAT-File für Update mit Neustart (wie FerdlWorks)
+        bat_path = installer_path.with_suffix(".bat")
+        with open(bat_path, "w", encoding="utf-8") as f:
+            f.write(f"""@echo off
+ping -n 4 127.0.0.1 > nul
+start /wait "" "{installer_path}" /SILENT /SUPPRESSMSGBOXES /NORESTART
+if exist "{target_exe}" (
+    start "" "{target_exe}"
+)
+del "%~f0" 2>nul
+""")
 
-        logger.info("Starte Updater-Prozess...")
+        logger.info("Starte Update-Installation mit BAT-File...")
 
-        # Updater starten: wartet auf alte PID, ersetzt EXE, startet neu
+        # Updater starten: BAT-File wartet, führt Installer aus, startet App neu
         creationflags = (
             subprocess.CREATE_NEW_PROCESS_GROUP
             | subprocess.DETACHED_PROCESS
         )
         subprocess.Popen(
-            [
-                sys.executable, str(updater_path),
-                "--old-pid", str(os.getpid()),
-                "--new-exe", str(exe_path),
-                "--target-exe", str(target_exe),
-                "--working-dir", str(target_exe.parent)
-            ],
-            creationflags=creationflags
+            [str(bat_path)],
+            creationflags=creationflags,
+            shell=True
         )
 
-        logger.info("Updater gestartet, beende App sauber.")
+        logger.info("Updater (BAT) gestartet, beende App sauber.")
 
         # Flag setzen: on_close beendet die App wirklich
         global SHUTTING_DOWN_FOR_UPDATE
