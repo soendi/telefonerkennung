@@ -32,7 +32,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "1.3.12"
+APP_VERSION = "1.3.13"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
