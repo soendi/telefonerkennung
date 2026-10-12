@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.10"
+APP_VERSION = "3.2.11"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -80,7 +80,23 @@ UNKNOWN_NAMES = {
 # Updater-Script als String (wird bei Update im Temp-Verzeichnis geschrieben)
 
 
+def _trim_log_file(path, max_lines=1000):
+    """Kürzt die Logdatei beim Start auf die letzten max_lines Zeilen."""
+    try:
+        if not path.exists():
+            return
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        if len(lines) > max_lines:
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(lines[-max_lines:])
+    except OSError:
+        pass
+
+
 def setup_logging():
+    _trim_log_file(LOG_DIR / "telefonerkennung.log", max_lines=1000)
+
     logger = logging.getLogger("telefonerkennung")
     logger.setLevel(logging.INFO)
 
@@ -1019,7 +1035,7 @@ def get_incoming_call():
         if _last_swisscom_status != status:
             _last_swisscom_status = status
             if status is not None and panel is not None and status not in ACTIVE_CALL_STATUSES:
-                logger.info("Swisscom-Status (kein aktiver Anruf): %r", status)
+                logger.info("*** Swisscom-Status (kein aktiver Anruf): %r ***", status)
 
         if status not in ACTIVE_CALL_STATUSES or panel is None:
             return None
