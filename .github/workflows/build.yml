@@ -30,13 +30,21 @@ jobs:
           # Spec-File nutzen (zuverlässige DLL-Einbindung)
           pyinstaller Telefonerkennung.spec
           # python312.dll für Installer separat bereitstellen (neben EXE im App-Ordner)
-          $pythonDll = Join-Path (Split-Path (Get-Command python).Source) "python312.dll"
+          $pythonExe = (Get-Command python).Source
+          $pythonDll = Join-Path (Split-Path $pythonExe) "python312.dll"
           if (Test-Path $pythonDll) {
             Copy-Item $pythonDll -Destination "dist\python312.dll" -Force
-            Write-Host "python312.dll nach dist kopiert"
+            Write-Host "python312.dll nach dist kopiert: $pythonDll"
           } else {
-            Write-Error "python312.dll nicht gefunden!"
-            exit 1
+            # Fallback: in Python-Installationsverzeichnis suchen
+            $altDll = Join-Path $env:PYTHON_HOME "python312.dll"
+            if (Test-Path $altDll) {
+              Copy-Item $altDll -Destination "dist\python312.dll" -Force
+              Write-Host "python312.dll aus PYTHON_HOME kopiert: $altDll"
+            } else {
+              Write-Error "python312.dll nicht gefunden! Weder bei python.exe noch in PYTHON_HOME."
+              exit 1
+            }
           }
 
       - name: Install Inno Setup
