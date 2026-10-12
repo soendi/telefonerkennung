@@ -32,7 +32,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "1.3.13"
+APP_VERSION = "1.3.14"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -76,6 +76,82 @@ UNKNOWN_NAMES = {
     "anonymous",
     "anonymer anrufer",
 }
+
+
+# Updater-Script als String (wird bei Update im Temp-Verzeichnis geschrieben)
+UPDATER_SCRIPT = r'''
+import sys
+import os
+import time
+import subprocess
+import shutil
+import argparse
+from pathlib import Path
+
+def wait_for_process_exit(pid, timeout=30):
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.windll.kernel32
+    SYNCHRONIZE = 0x00100000
+    handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+    if not handle:
+        return True
+    WAIT_OBJECT_0 = 0
+    result = kernel32.WaitForSingleObject(handle, timeout * 1000)
+    kernel32.CloseHandle(handle)
+    return result == 0
+
+def replace_exe(old_exe, new_exe, max_retries=10):
+    for i in range(max_retries):
+        try:
+            backup = old_exe.with_suffix(b'.exe.bak')
+            if old_exe.exists():
+                shutil.move(str(old_exe), str(backup))
+            shutil.copy2(str(new_exe), str(old_exe))
+            if backup.exists():
+                backup.unlink()
+            return True
+        except PermissionError:
+            time.sleep(0.5)
+        except Exception as e:
+            print(f"Fehler beim Ersetzen: {e}")
+            time.sleep(0.5)
+    return False
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(b'--old-pid', type=int, required=True)
+    parser.add_argument(b'--new-exe', required=True)
+    parser.add_argument(b'--target-exe', required=True)
+    parser.add_argument(b'--working-dir', required=True)
+    args = parser.parse_args()
+
+    print(f"Updater: alte PID={args.old_pid}, new={args.new_exe}, target={args.target_exe}")
+
+    if not wait_for_process_exit(args.old_pid, timeout=30):
+        print("Timeout: Alte Instanz nicht beendet")
+        return 1
+    print("Alte Instanz beendet.")
+
+    target_exe = Path(args.target_exe)
+    new_exe = Path(args.new_exe)
+    if not replace_exe(target_exe, new_exe):
+        print("FEHLER: EXE konnte nicht ersetzt werden")
+        return 1
+    print("EXE ersetzt.")
+
+    os.chdir(args.working_dir)
+    try:
+        subprocess.Popen([str(target_exe)], cwd=args.working_dir, start_new_session=True)
+        print("Neue Instanz gestartet.")
+    except Exception as e:
+        print(f"Fehler beim Starten: {e}")
+        return 1
+    return 0
+
+if __name__ == b'__main__':
+    sys.exit(main())
+'''
 
 
 # ============================================================
@@ -2554,11 +2630,11 @@ def check_for_update():
 
 
 def download_and_install_update(url, version):
-    """Lädt den Installer herunter, startet ihn und beendet die App.
+    """Lädt den Installer herunter, extrahiert die EXE und nutzt
+    einen separaten Updater-Prozess für das Update.
 
-    Der Installer läuft als unabhängiger Prozess und schließt die
-    laufende App selbst über CloseApplications (Restart Manager).
-    Danach startet er die neue Version automatisch (RestartApplications).
+    Vermeidet das DLL-Problem beim Update, da der Updater die
+    alte Instanz wartet, die EXE ersetzt und die neue Version startet.
     """
     global SHUTTING_DOWN_FOR_UPDATE
     try:
@@ -2576,41 +2652,84 @@ def download_and_install_update(url, version):
 
         logger.info("Installer heruntergeladen: %s", installer_path)
 
-        # Flag setzen: on_close beendet die App jetzt wirklich.
-        SHUTTING_DOWN_FOR_UPDATE = True
+        # Inno Setup Installer entpacken (/extract) um an die EXE zu kommen
+        extract_dir = Path(tempfile.gettempdir()) / f"telefonerkennung-extract-{version}"
+        if extract_dir.exists():
+            shutil.rmtree(extract_dir, ignore_errors=True)
+        extract_dir.mkdir(parents=True, exist_ok=True)
 
-        # Installer als komplett unabhängigen Prozess starten
-        # (nicht als Kind – sonst stirbt er mit uns).
+        logger.info("Entpacke Installer nach %s", extract_dir)
+        if suffix == ".msi":
+            subprocess.run(
+                ["msiexec", "/a", str(installer_path), "/qn", f"TARGETDIR={extract_dir}"],
+                check=True, timeout=60
+            )
+        else:
+            subprocess.run(
+                [str(installer_path), f"/DIR={extract_dir}", "/VERYSILENT", "/NORESTART"],
+                check=True, timeout=60
+            )
+
+        # EXE im entpackten Ordner finden
+        extracted_exe = None
+        for root, dirs, files in os.walk(extract_dir):
+            for f in files:
+                if f.lower() == "telefonerkennung.exe":
+                    extracted_exe = Path(root) / f
+                    break
+            if extracted_exe:
+                break
+
+        if not extracted_exe or not extracted_exe.exists():
+            logger.error("EXE nach Entpacken nicht gefunden")
+            return False
+
+        logger.info("EXE extrahiert: %s", extracted_exe)
+
+        # Ziel-EXE im Installationsverzeichnis
+        target_exe = Path(sys.executable)
+        if getattr(sys, 'frozen', False):
+            # Wir laufen als PyInstaller EXE
+            target_exe = Path(sys.executable)
+        else:
+            # Entwicklungsumgebung
+            target_exe = Path(__file__).with_name("Telefonerkennung.exe")
+
+        # Updater-Script im Temp-Verzeichnis ablegen
+        updater_path = Path(tempfile.gettempdir()) / f"updater-{version}.py"
+        with open(updater_path, "w", encoding="utf-8") as f:
+            f.write(UPDATER_SCRIPT)
+
+        logger.info("Starte Updater-Prozess...")
+
+        # Updater starten: wartet auf alte PID, ersetzt EXE, startet neu
         creationflags = (
             subprocess.CREATE_NEW_PROCESS_GROUP
             | subprocess.DETACHED_PROCESS
         )
-        if suffix == ".msi":
-            subprocess.Popen(
-                ["msiexec", "/i", str(installer_path), "/qn", "/norestart"],
-                creationflags=creationflags,
-            )
-        else:
-            subprocess.Popen(
-                [str(installer_path), "/SILENT", "/NORESTART"],
-                creationflags=creationflags,
-            )
+        subprocess.Popen(
+            [
+                sys.executable, str(updater_path),
+                "--old-pid", str(os.getpid()),
+                "--new-exe", str(extracted_exe),
+                "--target-exe", str(target_exe),
+                "--working-dir", str(target_exe.parent)
+            ],
+            creationflags=creationflags
+        )
 
-        logger.info("Installer gestartet, beende App sauber.")
+        logger.info("Updater gestartet, beende App sauber.")
 
-        # App sauber beenden: Thread-sicher über die GUI-Queue,
-        # damit root.after im Hauptthread laeuft. Der Installer
-        # erkennt, dass die Datei frei ist, und ersetzt sie.
+        # Flag setzen: on_close beendet die App wirklich
+        SHUTTING_DOWN_FOR_UPDATE = True
         if _app_instance is not None:
             _app_instance.request_quit()
         else:
             os._exit(0)
 
-        # Sicherheits-Netz: Falls die GUI-Queue nicht abgearbeitet
-        # wird, nach 10s hart beenden.
         threading.Timer(10, os._exit, args=(0,)).start()
 
-    except (OSError, requests.RequestException) as e:
+    except Exception as e:
         logger.error("Update-Installation fehlgeschlagen: %s", e)
         SHUTTING_DOWN_FOR_UPDATE = False
         return False
