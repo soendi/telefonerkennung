@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.9"
+APP_VERSION = "3.2.10"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -586,19 +586,6 @@ class CallToast:
         self.window.maxsize(400, 99999)
         set_window_icon(self.window)
 
-    def _force_topmost(self):
-        """Erzwingt echtes Topmost auch über Action Center / Shell.
-        Nur aufrufen, wenn Fenster bereits sichtbar (deiconify)."""
-        try:
-            import ctypes
-            hwnd = ctypes.windll.user32.GetParent(self.window.winfo_id())
-            if not hwnd:
-                hwnd = self.window.winfo_id()
-            # HWND_TOPMOST = -1, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE = 0x0013
-            ctypes.windll.user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0013)
-        except Exception:
-            pass
-
         frame = tk.Frame(self.window, bg="#1e1e1e")
         frame.pack(fill="both", expand=True)
 
@@ -662,6 +649,17 @@ class CallToast:
         self.name_entry.bind("<Return>", self._commit_edit)
         self.name_entry.bind("<Escape>", self._cancel_edit)
         self.name_entry.bind("<FocusOut>", self._commit_edit)
+
+    def _force_topmost(self):
+        """Hält den Toast über anderen Fenstern (auch Action Center).
+        Absichtlich nur Tk-eigene Mittel: winfo_id() kann auf Windows
+        ein veraltetes Handle liefern, Tk selbst kennt das richtige.
+        Nimmt keinen Fokus weg."""
+        try:
+            self.window.wm_attributes("-topmost", True)
+            self.window.lift()
+        except Exception:
+            pass
 
     def set_click_callback(self, callback):
         self._click_callback = callback
