@@ -4,9 +4,19 @@ import sys
 import os
 from pathlib import Path
 
-# Python-DLL(s) finden
+# Python-DLL(s) finden - explizit im Installationsverzeichnis suchen
 python_dll_dir = Path(sys.executable).parent
 python_dlls = list(python_dll_dir.glob("python*.dll"))
+
+# Fallback: Falls keine DLLs gefunden, in sys.prefix suchen
+if not python_dlls:
+    python_dll_dir = Path(sys.prefix)
+    python_dlls = list(python_dll_dir.glob("python*.dll"))
+    print(f"PyInstaller: Fallback - Python-DLL-Verzeichnis: {python_dll_dir}")
+
+# Debug: Welche DLLs wurden gefunden?
+print(f"PyInstaller: Python-DLLs gefunden: {[dll.name for dll in python_dlls]}")
+print(f"PyInstaller: Python-DLL-Verzeichnis: {python_dll_dir}")
 
 block_cipher = None
 
@@ -33,11 +43,11 @@ a = Analysis(
     excludes=[],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
-    cipher=block_cipher,
+    cipher=None,
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 
 exe = EXE(
     pyz,

@@ -32,7 +32,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -1114,6 +1114,7 @@ class CallerIDApp:
     def simulate_call(self):
         print(f"TEST: simulate_call aufgerufen, test_mode={self.test_mode}")
         if self.test_mode:
+            print("TEST: test_mode bereits aktiv, breche ab")
             return
 
         self.test_mode = True
@@ -1125,6 +1126,7 @@ class CallerIDApp:
 
         # Testanruf nach 15 Sekunden automatisch beenden.
         self.root.after(15000, self.end_test_call)
+        print("TEST: after(15000, end_test_call) gesetzt")
 
     def end_test_call(self):
         print("TEST: end_test_call – Testanruf wird beendet (test_mode=False)")
@@ -1680,7 +1682,7 @@ class CallerIDApp:
         self.call_started_at = None
 
     def process_call(self, call):
-        print(f"TRACE: process_call: {call}")
+        print(f"TRACE: process_call aufgerufen: call={call}, test_mode={getattr(self, 'test_mode', 'N/A')}")
 
         if call is None:
             if self.last_call_id is not None:
