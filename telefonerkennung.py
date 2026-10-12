@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.7"
+APP_VERSION = "3.2.8"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -569,6 +569,9 @@ ACTIVE_CALL_STATUSES = {
     "In Call",
 }
 
+# Letzter gesehener Swisscom-Status (für Log bei unbekanntem Status).
+_last_swisscom_status = None
+
 class CallToast:
     def __init__(self, root):
         self.root = root
@@ -712,24 +715,73 @@ class CallToast:
         self.name_label.pack(fill="x", before=self.number_label)
         return "break"
 
-    def show(self, name, number):
+    def show(self, name, number, status=None):
+        logger.info("TOAST SHOW aufgerufen: name=%s, number=%s, status=%r", name, number, status)
         # Restlichen Editierzustand zurücksetzen.
         if self._editing:
             self._cancel_edit()
         self._edited_name = None
         self._original_name = name or "Unbekannter Anrufer"
         self._current_number = number or ""
+        self._connected = status is not None and status != "Ankommender Anruf"
+        self._title_prefix = "Verbunden" if self._connected else "Eingehender Anruf"
 
         self.name_label.config(text=self._original_name)
         self.number_label.config(text=format_phone_display(self._current_number))
         self._ring_seconds = 0
-        self.title_label.config(text="Eingehender Anruf (0 s)")
+        self.title_label.config(text=f"{self._title_prefix} (0 s)")
         self._calc_target()
+        # Zielposition sofort setzen: Auch wenn die Animation
+        # fehlschlägt, steht der Toast danach an der richtigen Stelle.
+        try:
+            self.window.geometry(f"+{self._target_x}+{self._target_y}")
+        except Exception:
+            pass
         self.window.deiconify()
         self.window.lift()
         self._force_topmost()
         self._start_ticker()
-        self._animate_in()
+        try:
+            self._animate_in()
+        except Exception as e:
+            logger.error("TOAST Animationsfehler in show(): %s", e)
+        # Sicherheitsnetz: Falls die Animation hängen bleibt,
+        # Toast an der Zielposition sicherstellen.
+        try:
+            self.window.after(
+                self.ANIM_STEPS * self.ANIM_DELAY_MS + 300,
+                self._ensure_visible,
+            )
+        except Exception:
+            pass
+        logger.info("TOAST: show() abgeschlossen, Fenster sollte sichtbar sein")
+
+    def _ensure_visible(self):
+        """Stellt sicher, dass ein aktiver Toast sichtbar an der
+        Zielposition steht (Fallback falls Animation hängt)."""
+        try:
+            if not self._current_number:
+                return
+            self.window.geometry(f"+{self._target_x}+{self._target_y}")
+            self.window.deiconify()
+            self.window.lift()
+            self._force_topmost()
+        except Exception:
+            pass
+
+    def update_status(self, status):
+        """Aktualisiert Klingeln/Verbunden während eines laufenden Anrufs."""
+        try:
+            connected = status is not None and status != "Ankommender Anruf"
+            prefix = "Verbunden" if connected else "Eingehender Anruf"
+            if getattr(self, "_title_prefix", None) == prefix and getattr(self, "_connected", None) == connected:
+                return
+            self._connected = connected
+            self._title_prefix = prefix
+            self.title_label.config(text=f"{prefix} ({self._ring_seconds} s)")
+            logger.info("TOAST Statuswechsel: %r", status)
+        except Exception:
+            pass
 
     def _start_ticker(self):
         self._stop_ticker()
@@ -737,9 +789,16 @@ class CallToast:
 
     def _tick(self):
         self._ring_seconds += 1
+        prefix = getattr(self, "_title_prefix", "Eingehender Anruf")
         self.title_label.config(
-            text=f"Eingehender Anruf ({self._ring_seconds} s)"
+            text=f"{prefix} ({self._ring_seconds} s)"
         )
+        # Toast über Action Center halten: Topmost regelmässig erneuern.
+        try:
+            self.window.lift()
+            self._force_topmost()
+        except Exception:
+            pass
         self._ticker_after_id = self.window.after(1000, self._tick)
 
     def _stop_ticker(self):
@@ -790,10 +849,17 @@ class CallToast:
         self.window.update_idletasks()
         w = 400
         h = self.window.winfo_reqheight()
+        if not h or h < 50:
+            h = 140
+        if h > 600:
+            h = 600
         # Breite fest erzwingen (overrideredirect ignoriert minsize).
         self.window.geometry(f"{w}x{h}")
         self.window.update_idletasks()
         screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        work_right = screen_w
+        work_bottom = screen_h
 
         # Arbeitsbereich (ohne Taskleiste) über Win32-API holen.
         try:
@@ -809,16 +875,26 @@ class CallToast:
                 ]
 
             rect = RECT()
-            ctypes.windll.user32.SystemParametersInfoW(
+            if ctypes.windll.user32.SystemParametersInfoW(
                 0x0030, 0, ctypes.byref(rect), 0
-            )
-            work_bottom = rect.bottom
+            ):
+                if rect.right > 0:
+                    work_right = rect.right
+                if rect.bottom > 0:
+                    work_bottom = rect.bottom
         except Exception:
-            work_bottom = self.root.winfo_screenheight()
+            pass
 
-        self._target_x = screen_w - w
-        self._target_y = work_bottom - h
-        self._screen_w = screen_w
+        x = work_right - w
+        y = work_bottom - h
+        if x < 0:
+            x = 0
+        if y < 0:
+            y = 0
+
+        self._target_x = x
+        self._target_y = y
+        self._screen_w = screen_w if screen_w and screen_w > w else x + w + 200
 
     def _stop_anim(self):
         if self._anim_after_id is not None:
@@ -837,16 +913,33 @@ class CallToast:
         steps = self.ANIM_STEPS
 
         def step(i):
-            # Ease-out: grosse Schritte am Anfang, kleine am Ende.
-            progress = 1 - (1 - i / steps) ** 2
-            x = int(start_x + (end_x - start_x) * progress)
-            self.window.geometry(f"+{x}+{y}")
-            if i < steps:
-                self._anim_after_id = self.window.after(
-                    self.ANIM_DELAY_MS, step, i + 1
-                )
-            else:
-                self._anim_after_id = None
+            try:
+                # Ease-out: grosse Schritte am Anfang, kleine am Ende.
+                progress = 1 - (1 - i / steps) ** 2
+                x = int(start_x + (end_x - start_x) * progress)
+                self.window.geometry(f"+{x}+{y}")
+                if i < steps:
+                    self._anim_after_id = self.window.after(
+                        self.ANIM_DELAY_MS, step, i + 1
+                    )
+                else:
+                    self._anim_after_id = None
+                    # Sicherstellen, dass Fenster am Ende sichtbar
+                    # an der Zielposition steht.
+                    self.window.geometry(f"+{end_x}+{y}")
+                    self.window.deiconify()
+                    self.window.lift()
+                    self._force_topmost()
+            except Exception as e:
+                logger.error("TOAST Animationsfehler: %s", e)
+                # Fallback: Fenster direkt an Zielposition
+                try:
+                    self.window.geometry(f"+{end_x}+{y}")
+                    self.window.deiconify()
+                    self.window.lift()
+                    self._force_topmost()
+                except Exception:
+                    pass
 
         step(0)
 
@@ -917,6 +1010,12 @@ def get_incoming_call():
             except Exception:
                 continue
 
+        global _last_swisscom_status
+        if _last_swisscom_status != status:
+            _last_swisscom_status = status
+            if status is not None and panel is not None and status not in ACTIVE_CALL_STATUSES:
+                logger.info("Swisscom-Status (kein aktiver Anruf): %r", status)
+
         if status not in ACTIVE_CALL_STATUSES or panel is None:
             return None
 
@@ -929,7 +1028,7 @@ def get_incoming_call():
 
                     if (
                         value
-                        and value != "Ankommender Anruf"
+                        and value != status
                         and value not in texts
                     ):
                         texts.append(value)
@@ -955,10 +1054,10 @@ def get_incoming_call():
             "Unbekannter Anrufer",
         )
 
-        return {"name": name, "nummer": number}
+        return {"name": name, "nummer": number, "status": status}
 
     except Exception as error:
-        print(f"Fehler beim Lesen der Swisscom-App: {error}")
+        logger.error("Fehler beim Lesen der Swisscom-App: %s", error)
         return None
 
 
@@ -1126,6 +1225,9 @@ class CallerIDApp:
             "nummer": "+41817564572",
         }
         logger.info(f"TEST: test_mode gesetzt, Daten={self.test_call_data}")
+
+        # Test-Daten sofort in Queue legen, damit Toast sofort angezeigt wird
+        self.ui_queue.put(("poll", self.test_call_data))
 
         # Testanruf nach 15 Sekunden automatisch beenden.
         self.root.after(15000, self.end_test_call)
@@ -1582,10 +1684,12 @@ class CallerIDApp:
         while not self.stop_event.is_set():
             if self.test_mode:
                 call = self.test_call_data
-                print(f"TEST: poll_worker liefert Test-Call: {call}")
+                # Nur senden, wenn Test-Daten vorhanden sind
+                if call is not None:
+                    self.ui_queue.put(("poll", call))
             else:
                 call = get_incoming_call()
-            self.ui_queue.put(("poll", call))
+                self.ui_queue.put(("poll", call))
             self.stop_event.wait(POLL_INTERVAL_MS / 1000)
 
     def on_close(self):
@@ -1701,10 +1805,15 @@ class CallerIDApp:
 
         name = call["name"]
         number = call["nummer"]
+        status = call.get("status")
         normalized = normalize_phone(number)
         call_id = (normalized, name)
 
         if call_id == self.last_call_id:
+            # Gleicher Anruf, evtl. neuer Status (Klingeln -> Verbunden):
+            # Toast stehen lassen, nur Titel aktualisieren.
+            if status:
+                self.toast.update_status(status)
             return
 
         # Vorherigen Anruf zu Ende protokollieren, falls direkt
@@ -1727,7 +1836,7 @@ class CallerIDApp:
                 number,
                 "Aus dem lokalen Telefonbuch geladen.",
             )
-            self.toast.show(contact["name"], number)
+            self.toast.show(contact["name"], number, status)
             return
 
         # 2. Interne Durchwahlen nicht online suchen.
@@ -1742,7 +1851,7 @@ class CallerIDApp:
                 save_contact(number, name, source="Swisscom")
                 self.refresh_lists()
 
-            self.toast.show(name, number)
+            self.toast.show(name, number, status)
             return
 
         # 3. Bereits unbekannte Nummern nicht automatisch erneut suchen.
@@ -1760,7 +1869,7 @@ class CallerIDApp:
                 f"{reason}\n"
                 "Bereits in der Liste unbekannter Nummern.",
             )
-            self.toast.show(name, number)
+            self.toast.show(name, number, status)
             return
 
         # 4. Angezeigten echten Namen von Swisscom übernehmen.
@@ -1775,15 +1884,15 @@ class CallerIDApp:
                 "Name von Swisscom übernommen und lokal gespeichert.",
             )
             self.refresh_lists()
-            self.toast.show(name, number)
+            self.toast.show(name, number, status)
             return
 
         # 5. Unbekannte externe Nummer online suchen.
         # Im Test-Modus: Toast sofort anzeigen, keine Online-Suche.
         if self.test_mode:
-            self.toast.show(name, number)
+            self.toast.show(name, number, status)
             return
-        self.toast.show(name, number)
+        self.toast.show(name, number, status)
         self.start_lookup(number, name)
 
     # --------------------------------------------------------
@@ -2412,8 +2521,9 @@ class CallerIDApp:
             self._log_sort_desc = not self._log_sort_desc
         else:
             self._log_sort_column = column
-            # Standard: Zeit absteigend, sonst aufsteigend
-            self._log_sort_desc = column == "time"
+            # Standard: Datum/Zeit absteigend (aktueller Anruf oben),
+            # sonst aufsteigend.
+            self._log_sort_desc = column in ("date", "time")
         self.refresh_call_log()
 
 
