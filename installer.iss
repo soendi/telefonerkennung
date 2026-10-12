@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-#define MyAppVersion "3.2.0"
+#define MyAppVersion "3.2.3"
 #endif
 
 [Setup]
@@ -8,10 +8,10 @@ AppName=Telefonerkennung
 AppVersion={#MyAppVersion}
 AppPublisher=Telefonerkennung
 
-; Installation pro Benutzer, ohne Administratorrechte
-DefaultDirName={localappdata}\Programs\Telefonerkennung
+; Installation systemweit (Program Files), mit Admin-Rechten
+DefaultDirName={pf}\Telefonerkennung
 DefaultGroupName=Telefonerkennung
-PrivilegesRequired=lowest
+PrivilegesRequired=admin
 
 OutputDir=installer
 OutputBaseFilename=Telefonerkennung-Setup-{#MyAppVersion}
@@ -39,17 +39,14 @@ Name: "{group}\Telefonerkennung"; Filename: "{app}\Telefonerkennung.exe"; IconFi
 Name: "{autodesktop}\Telefonerkennung"; Filename: "{app}\Telefonerkennung.exe"; IconFilename: "{app}\Telefonerkennung.exe"
 
 [Registry]
-; Autostart mit Windows (pro Benutzer).
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Telefonerkennung"; ValueData: """{app}\Telefonerkennung.exe"""; Flags: uninsdeletevalue
+; Autostart systemweit (für alle Benutzer).
+Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Telefonerkennung"; ValueData: """{app}\Telefonerkennung.exe"""; Flags: uninsdeletevalue
 
 [Run]
 ; App nach Installation starten – auch im Silent-Modus (kein
 ; postinstall-Flag, sonst wird der Eintrag im Stillen übersprungen).
-; runasoriginaluser ist entscheidend: der Installer läuft erhöht,
-; und ein normales Exec würde die App ebenfalls erhöht starten.
-; Eine erhöhte Instanz wiederum ist für normale Instanzen nicht
-; mehr per Mutex erreichbar – daher kämen mehrere Instanzen zustande.
-Filename: "{app}\Telefonerkennung.exe"; Flags: nowait postinstall skipifsilent runasoriginaluser
+; runasoriginaluser NICHT gesetzt: Installer läuft als Admin, App startet als Admin.
+Filename: "{app}\Telefonerkennung.exe"; Flags: nowait postinstall skipifsilent
 
 [Code]
 function InitializeSetup(): Boolean;
