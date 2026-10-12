@@ -32,7 +32,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "1.3.4"
+APP_VERSION = "1.3.5"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -171,6 +171,11 @@ def format_phone_display(number):
 
 def is_real_name(name):
     return (name or "").strip().casefold() not in UNKNOWN_NAMES
+
+
+def _is_verteiler(name):
+    """Prüft ob Name 'verteiler' enthält (case-insensitive)."""
+    return "verteiler" in (name or "").lower()
 
 
 def is_number_text(text):
@@ -1761,7 +1766,9 @@ class CallerIDApp:
             return
 
         # 4. Angezeigten echten Namen von Swisscom übernehmen.
-        if is_real_name(name):
+        # Ausnahme: Namen mit 'verteiler' müssen zwingend online nachgeschlagen werden,
+        # da Verteiler weitergeleitet werden und der eigentliche Anrufer dahintersteckt.
+        if is_real_name(name) and not _is_verteiler(name):
             self.call_log_name = name
             save_contact(number, name, source="Swisscom")
             self.set_call_display(
