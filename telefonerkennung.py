@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.11"
+APP_VERSION = "3.2.12"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -222,6 +222,7 @@ def init_db():
                 number TEXT PRIMARY KEY,
                 display_number TEXT NOT NULL,
                 name TEXT NOT NULL,
+                kontakt TEXT NOT NULL DEFAULT '',
                 source TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -231,6 +232,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS unknown_numbers (
                 number TEXT PRIMARY KEY,
                 display_number TEXT NOT NULL,
+                kontakt TEXT NOT NULL DEFAULT '',
                 first_seen TEXT NOT NULL,
                 last_seen TEXT NOT NULL,
                 reason TEXT NOT NULL
@@ -243,10 +245,33 @@ def init_db():
                 number TEXT NOT NULL,
                 display_number TEXT NOT NULL,
                 name TEXT NOT NULL,
+                kontakt TEXT NOT NULL DEFAULT '',
                 started_at TEXT NOT NULL,
                 duration_s INTEGER NOT NULL
             )
         """)
+
+
+def migrate_add_kontakt():
+    """Fügt bestehenden Tabellen die Kontakt-Spalte hinzu (Update-Pfad)."""
+    for table in ("phonebook", "unknown_numbers", "call_log"):
+        try:
+            with connect_db() as db:
+                cols = [row["name"] for row in db.execute(
+                    f"PRAGMA table_info({table})"
+                ).fetchall()]
+                if "kontakt" not in cols:
+                    db.execute(
+                        f"ALTER TABLE {table} "
+                        "ADD COLUMN kontakt TEXT NOT NULL DEFAULT ''"
+                    )
+                    logger.info(
+                        "DB-Migration: Spalte kontakt in %s ergänzt.", table
+                    )
+        except Exception as error:
+            logger.error(
+                "DB-Migration für %s fehlgeschlagen: %s", table, error
+            )
 
 
 def get_contact(number):
@@ -269,7 +294,7 @@ def is_unknown(number):
     return get_unknown_entry(number) is not None
 
 
-def save_contact(number, name, source="Manuell"):
+def save_contact(number, name, kontakt=None, source="Manuell"):
     normalized = normalize_phone(number)
     name = (name or "").strip()
     number = (number or "").strip()
@@ -280,17 +305,27 @@ def save_contact(number, name, source="Manuell"):
     if not name:
         raise ValueError("Der Name darf nicht leer sein.")
 
+    # kontakt=None heisst "behalten": bestehenden Wert nicht überschreiben.
+    if kontakt is None:
+        try:
+            existing = get_contact(number)
+            kontakt = existing["kontakt"] if existing else ""
+        except Exception:
+            kontakt = ""
+    kontakt = (kontakt or "").strip()
+
     with connect_db() as db:
         db.execute("""
             INSERT INTO phonebook
-                (number, display_number, name, source, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+                (number, display_number, name, kontakt, source, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(number) DO UPDATE SET
                 display_number = excluded.display_number,
                 name = excluded.name,
+                kontakt = excluded.kontakt,
                 source = excluded.source,
                 updated_at = excluded.updated_at
-        """, (normalized, number, name, source, now()))
+        """, (normalized, number, name, kontakt, source, now()))
 
         db.execute(
             "DELETE FROM unknown_numbers WHERE number = ?",
@@ -337,7 +372,7 @@ def delete_contact(number):
 def get_all_contacts():
     with connect_db() as db:
         return db.execute("""
-            SELECT number, display_number, name, source, updated_at
+            SELECT number, display_number, name, kontakt, source, updated_at
             FROM phonebook
             ORDER BY name COLLATE NOCASE
         """).fetchall()
@@ -346,22 +381,23 @@ def get_all_contacts():
 def get_all_unknown():
     with connect_db() as db:
         return db.execute("""
-            SELECT number, display_number, first_seen, last_seen, reason
+            SELECT number, display_number, kontakt, first_seen, last_seen, reason
             FROM unknown_numbers
             ORDER BY last_seen DESC
         """).fetchall()
 
 
-def save_call_log(number, name, started_at, duration_s):
+def save_call_log(number, name, kontakt, started_at, duration_s):
     with connect_db() as db:
         db.execute("""
             INSERT INTO call_log
-                (number, display_number, name, started_at, duration_s)
-            VALUES (?, ?, ?, ?, ?)
+                (number, display_number, name, kontakt, started_at, duration_s)
+            VALUES (?, ?, ?, ?, ?, ?)
         """, (
             normalize_phone(number),
             number,
             name or "Unbekannter Anrufer",
+            kontakt or "",
             started_at,
             duration_s,
         ))
@@ -370,7 +406,7 @@ def save_call_log(number, name, started_at, duration_s):
 def get_call_logs(limit=500):
     with connect_db() as db:
         return db.execute("""
-            SELECT display_number, name, started_at, duration_s
+            SELECT display_number, name, kontakt, started_at, duration_s
             FROM call_log
             ORDER BY started_at DESC
             LIMIT ?
@@ -634,6 +670,22 @@ class CallToast:
         )
         # Entry initial versteckt (pack erst beim Bearbeiten).
 
+        self.kontakt_label = tk.Label(
+            content, text="",
+            fg="white", bg="#1e1e1e",
+            font=("Segoe UI", 11), anchor="w",
+        )
+        self.kontakt_label.pack(fill="x")
+
+        self.kontakt_entry = tk.Entry(
+            content,
+            fg="white", bg="#2a2a2a",
+            insertbackground="white",
+            font=("Segoe UI", 11),
+            relief="solid", bd=1,
+        )
+        # Entry initial versteckt (pack erst beim Bearbeiten).
+
         self.number_label = tk.Label(
             content, text="",
             fg="#aaaaaa", bg="#1e1e1e",
@@ -652,12 +704,15 @@ class CallToast:
         self._original_name = ""
         self._edited_name = None
         self._editing = False
+        self._original_kontakt = ""
+        self._edited_kontakt = None
+        self._editing_kontakt = False
         self._visible = False
         self._connected = False
         self._title_prefix = "Eingehender Anruf"
 
         for widget in (frame, content, self.title_label,
-                       self.number_label):
+                       self.kontakt_label, self.number_label):
             widget.bind("<Button-1>", self._on_click)
 
         # Doppelklick auf den Namen: inline bearbeiten.
@@ -665,6 +720,12 @@ class CallToast:
         self.name_entry.bind("<Return>", self._commit_edit)
         self.name_entry.bind("<Escape>", self._cancel_edit)
         self.name_entry.bind("<FocusOut>", self._commit_edit)
+
+        # Doppelklick auf den Kontakt: inline bearbeiten.
+        self.kontakt_label.bind("<Double-Button-1>", self._start_kontakt_edit)
+        self.kontakt_entry.bind("<Return>", self._commit_kontakt_edit)
+        self.kontakt_entry.bind("<Escape>", self._cancel_kontakt_edit)
+        self.kontakt_entry.bind("<FocusOut>", self._commit_kontakt_edit)
 
     def _force_topmost(self):
         """Hält den Toast über anderen Fenstern (auch Action Center).
@@ -686,7 +747,7 @@ class CallToast:
         self._edit_callback = callback
 
     def _on_click(self, _event=None):
-        if self._editing:
+        if self._editing or self._editing_kontakt:
             return
         if self._click_callback:
             self._click_callback()
@@ -718,7 +779,7 @@ class CallToast:
         new_name = self.name_entry.get().strip()
 
         self.name_entry.pack_forget()
-        self.name_label.pack(fill="x", before=self.number_label)
+        self.name_label.pack(fill="x", before=self.kontakt_label)
 
         if new_name and new_name != self._original_name:
             self._edited_name = new_name
@@ -729,22 +790,68 @@ class CallToast:
     def _cancel_edit(self, _event=None):
         self._editing = False
         self.name_entry.pack_forget()
-        self.name_label.pack(fill="x", before=self.number_label)
+        self.name_label.pack(fill="x", before=self.kontakt_label)
         return "break"
 
-    def show(self, name, number, status=None):
+    # ---------------------------------------------------------
+    # KONTAKT INLINE BEARBEITEN (DOPPELKLICK)
+    # ---------------------------------------------------------
+
+    def _start_kontakt_edit(self, _event=None):
+        if self._editing_kontakt:
+            return "break"
+
+        self._editing_kontakt = True
+        self.kontakt_label.pack_forget()
+        self.kontakt_entry.pack(fill="x", before=self.number_label)
+        self.kontakt_entry.delete(0, "end")
+        self.kontakt_entry.insert(
+            0, self.kontakt_label.cget("text") or ""
+        )
+        self.kontakt_entry.select_range(0, "end")
+        self.kontakt_entry.focus_set()
+        return "break"
+
+    def _commit_kontakt_edit(self, _event=None):
+        if not self._editing_kontakt:
+            return
+
+        self._editing_kontakt = False
+        new_kontakt = self.kontakt_entry.get().strip()
+
+        self.kontakt_entry.pack_forget()
+        self.kontakt_label.pack(fill="x", before=self.number_label)
+
+        if new_kontakt != self._original_kontakt:
+            self._edited_kontakt = new_kontakt
+            self.kontakt_label.config(text=new_kontakt)
+        else:
+            self.kontakt_label.config(text=new_kontakt)
+
+    def _cancel_kontakt_edit(self, _event=None):
+        self._editing_kontakt = False
+        self.kontakt_entry.pack_forget()
+        self.kontakt_label.pack(fill="x", before=self.number_label)
+        return "break"
+
+    def show(self, name, number, status=None, kontakt=""):
         logger.info("TOAST SHOW aufgerufen: name=%s, number=%s, status=%r", name, number, status)
         # Restlichen Editierzustand zurücksetzen.
         if self._editing:
             self._cancel_edit()
+        if self._editing_kontakt:
+            self._cancel_kontakt_edit()
         self._edited_name = None
+        self._edited_kontakt = None
         self._original_name = name or "Unbekannter Anrufer"
+        self._original_kontakt = kontakt or ""
         self._current_number = number or ""
         self._visible = True
         self._connected = status is not None and status != "Ankommender Anruf"
         self._title_prefix = "Verbunden" if self._connected else "Eingehender Anruf"
 
         self.name_label.config(text=self._original_name)
+        self.kontakt_label.config(text=self._original_kontakt)
         self.number_label.config(text=format_phone_display(self._current_number))
         self._ring_seconds = 0
         self.title_label.config(text=f"{self._title_prefix} (0 s)")
@@ -839,22 +946,27 @@ class CallToast:
         self._visible = False
         self._stop_ticker()
 
-        # Editierten Namen speichern, bevor das Fenster schliesst.
+        # Editierten Namen/Kontakt speichern, bevor das Fenster schliesst.
         if self._editing:
             self._commit_edit()
+        if self._editing_kontakt:
+            self._commit_kontakt_edit()
 
         if (
-            self._edited_name
+            (self._edited_name or self._edited_kontakt is not None)
             and self._current_number
             and self._edit_callback
         ):
             try:
                 self._edit_callback(
-                    self._current_number, self._edited_name
+                    self._current_number,
+                    self._edited_name,
+                    self._edited_kontakt,
                 )
             except Exception:
                 pass
             self._edited_name = None
+            self._edited_kontakt = None
 
         self._animate_out()
 
@@ -866,21 +978,18 @@ class CallToast:
     ANIM_DELAY_MS = 15
 
     def _calc_target(self):
-        """Berechnet die Zielposition: rechte Kante, auf Taskleiste."""
+        """Berechnet die Zielposition: horizontal zentriert, oben am Bildschirm."""
         self.window.update_idletasks()
         w = 400
         h = self.window.winfo_reqheight()
         if not h or h < 50:
-            h = 140
+            h = 160
         if h > 600:
             h = 600
         # Breite fest erzwingen (overrideredirect ignoriert minsize).
         self.window.geometry(f"{w}x{h}")
         self.window.update_idletasks()
         screen_w = self.root.winfo_screenwidth()
-        screen_h = self.root.winfo_screenheight()
-        work_right = screen_w
-        work_bottom = screen_h
 
         # Arbeitsbereich (ohne Taskleiste) über Win32-API holen.
         try:
@@ -899,23 +1008,22 @@ class CallToast:
             if ctypes.windll.user32.SystemParametersInfoW(
                 0x0030, 0, ctypes.byref(rect), 0
             ):
-                if rect.right > 0:
-                    work_right = rect.right
-                if rect.bottom > 0:
-                    work_bottom = rect.bottom
+                if rect.right - rect.left > w:
+                    screen_w = rect.right - rect.left
         except Exception:
             pass
 
-        x = work_right - w
-        y = work_bottom - h
+        if not screen_w or screen_w < w + 50:
+            screen_w = w + 50
+        x = (screen_w - w) // 2
         if x < 0:
             x = 0
-        if y < 0:
-            y = 0
+        y = 0
 
         self._target_x = x
         self._target_y = y
-        self._screen_w = screen_w if screen_w and screen_w > w else x + w + 200
+        self._target_h = h
+        self._screen_w = screen_w
 
     def _stop_anim(self):
         if self._anim_after_id is not None:
@@ -926,18 +1034,18 @@ class CallToast:
             self._anim_after_id = None
 
     def _animate_in(self):
-        """Fliegt von rechts (Bildschirmrand) nach links an den Zielort."""
+        """Fliegt von oben (Bildschirmrand) nach unten an den Zielort."""
         self._stop_anim()
-        start_x = self._screen_w
-        end_x = self._target_x
-        y = self._target_y
+        x = self._target_x
+        start_y = -self._target_h
+        end_y = self._target_y
         steps = self.ANIM_STEPS
 
         def step(i):
             try:
                 # Ease-out: grosse Schritte am Anfang, kleine am Ende.
                 progress = 1 - (1 - i / steps) ** 2
-                x = int(start_x + (end_x - start_x) * progress)
+                y = int(start_y + (end_y - start_y) * progress)
                 self.window.geometry(f"+{x}+{y}")
                 if i < steps:
                     self._anim_after_id = self.window.after(
@@ -947,7 +1055,7 @@ class CallToast:
                     self._anim_after_id = None
                     # Sicherstellen, dass Fenster am Ende sichtbar
                     # an der Zielposition steht.
-                    self.window.geometry(f"+{end_x}+{y}")
+                    self.window.geometry(f"+{x}+{end_y}")
                     self.window.deiconify()
                     self.window.lift()
                     self._force_topmost()
@@ -955,7 +1063,7 @@ class CallToast:
                 logger.error("TOAST Animationsfehler: %s", e)
                 # Fallback: Fenster direkt an Zielposition
                 try:
-                    self.window.geometry(f"+{end_x}+{y}")
+                    self.window.geometry(f"+{x}+{end_y}")
                     self.window.deiconify()
                     self.window.lift()
                     self._force_topmost()
@@ -965,26 +1073,34 @@ class CallToast:
         step(0)
 
     def _animate_out(self):
-        """Fliegt von links nach rechts zum Bildschirmrand hinaus."""
+        """Fliegt von der Zielposition nach oben zum Bildschirmrand hinaus."""
         self._stop_anim()
         self._calc_target()
-        start_x = self._target_x
-        end_x = self._screen_w
-        y = self._target_y
+        x = self._target_x
+        start_y = self._target_y
+        end_y = -self._target_h
         steps = self.ANIM_STEPS
 
         def step(i):
-            # Ease-in: kleine Schritte am Anfang, grosse am Ende.
-            progress = (i / steps) ** 2
-            x = int(start_x + (end_x - start_x) * progress)
-            self.window.geometry(f"+{x}+{y}")
-            if i < steps:
-                self._anim_after_id = self.window.after(
-                    self.ANIM_DELAY_MS, step, i + 1
-                )
-            else:
+            try:
+                # Ease-in: kleine Schritte am Anfang, grosse am Ende.
+                progress = (i / steps) ** 2
+                y = int(start_y + (end_y - start_y) * progress)
+                self.window.geometry(f"+{x}+{y}")
+                if i < steps:
+                    self._anim_after_id = self.window.after(
+                        self.ANIM_DELAY_MS, step, i + 1
+                    )
+                else:
+                    self._anim_after_id = None
+                    self.window.withdraw()
+            except Exception as e:
+                logger.error("TOAST Animationsfehler: %s", e)
+                try:
+                    self.window.withdraw()
+                except Exception:
+                    pass
                 self._anim_after_id = None
-                self.window.withdraw()
 
         step(0)
 
@@ -1106,6 +1222,7 @@ class CallerIDApp:
         # Anrufprotokoll: Startzeit und Anruferdaten des laufenden Anrufs.
         self.call_started_at = None
         self.call_log_name = ""
+        self.call_log_kontakt = ""
         self.call_log_number = ""
         # Zähler für aufeinanderfolgende Leer-Polls: Erst nach 2x None
         # gilt ein Anruf als wirklich beendet (Schutz vor Lese-Aussetzern).
@@ -1265,9 +1382,9 @@ class CallerIDApp:
         # Toast direkt ausblenden (läuft im GUI-Thread via root_after).
         if self.last_call_id is not None:
             logger.info("TRACE: blende Toast direkt nach Testende aus")
+            self.toast.hide()
             self._log_call_end()
             self.set_call_display("Warte auf eingehenden Anruf ...")
-            self.toast.hide()
             self.last_call_id = None
             logger.info("TRACE: toast.hide() ausgeführt")
 
@@ -1391,18 +1508,20 @@ class CallerIDApp:
 
         self.book_tree = ttk.Treeview(
             book_frame,
-            columns=("number", "name", "source"),
+            columns=("number", "name", "kontakt", "source"),
             show="headings",
             selectmode="browse",
         )
 
         self.book_tree.heading("number", text="Telefonnummer")
         self.book_tree.heading("name", text="Name")
+        self.book_tree.heading("kontakt", text="Kontakt")
         self.book_tree.heading("source", text="Quelle")
 
-        self.book_tree.column("number", width=180)
-        self.book_tree.column("name", width=330)
-        self.book_tree.column("source", width=180)
+        self.book_tree.column("number", width=160)
+        self.book_tree.column("name", width=220)
+        self.book_tree.column("kontakt", width=180)
+        self.book_tree.column("source", width=150)
 
         book_scroll = ttk.Scrollbar(
             book_frame,
@@ -1430,6 +1549,7 @@ class CallerIDApp:
         self.edit_original_number = None
         self.edit_number_var = tk.StringVar()
         self.edit_name_var = tk.StringVar()
+        self.edit_kontakt_var = tk.StringVar()
 
         ttk.Label(
             edit_contact_frame,
@@ -1451,11 +1571,21 @@ class CallerIDApp:
             textvariable=self.edit_name_var,
         ).grid(row=1, column=1, sticky="ew", padx=5, pady=4)
 
+        ttk.Label(
+            edit_contact_frame,
+            text="Kontakt:",
+        ).grid(row=2, column=0, sticky="w", padx=5, pady=4)
+
+        ttk.Entry(
+            edit_contact_frame,
+            textvariable=self.edit_kontakt_var,
+        ).grid(row=2, column=1, sticky="ew", padx=5, pady=4)
+
         edit_contact_frame.columnconfigure(1, weight=1)
 
         contact_buttons = ttk.Frame(edit_contact_frame)
         contact_buttons.grid(
-            row=2, column=0, columnspan=2,
+            row=3, column=0, columnspan=2,
             sticky="e", padx=5, pady=8,
         )
 
@@ -1501,19 +1631,21 @@ class CallerIDApp:
 
         self.unknown_tree = ttk.Treeview(
             unknown_frame,
-            columns=("number", "seen", "reason"),
+            columns=("number", "kontakt", "seen", "reason"),
             show="headings",
             selectmode="browse",
             height=9,
         )
 
         self.unknown_tree.heading("number", text="Telefonnummer")
+        self.unknown_tree.heading("kontakt", text="Kontakt")
         self.unknown_tree.heading("seen", text="Zuletzt gesehen")
         self.unknown_tree.heading("reason", text="Suchergebnis")
 
         self.unknown_tree.column("number", width=150)
-        self.unknown_tree.column("seen", width=155)
-        self.unknown_tree.column("reason", width=400)
+        self.unknown_tree.column("kontakt", width=180)
+        self.unknown_tree.column("seen", width=140)
+        self.unknown_tree.column("reason", width=280)
 
         unknown_scroll = ttk.Scrollbar(
             unknown_frame,
@@ -1562,11 +1694,23 @@ class CallerIDApp:
             textvariable=self.unknown_name_var,
         ).grid(row=1, column=1, sticky="ew", padx=5, pady=4)
 
+        ttk.Label(
+            edit_frame,
+            text="Kontakt:",
+        ).grid(row=2, column=0, sticky="w", padx=5, pady=4)
+
+        self.unknown_kontakt_var = tk.StringVar()
+
+        ttk.Entry(
+            edit_frame,
+            textvariable=self.unknown_kontakt_var,
+        ).grid(row=2, column=1, sticky="ew", padx=5, pady=4)
+
         edit_frame.columnconfigure(1, weight=1)
 
         unknown_buttons = ttk.Frame(edit_frame)
         unknown_buttons.grid(
-            row=2, column=0, columnspan=2,
+            row=3, column=0, columnspan=2,
             sticky="e", padx=5, pady=8,
         )
 
@@ -1601,10 +1745,10 @@ class CallerIDApp:
         log_frame = ttk.Frame(self.log_tab)
         log_frame.pack(fill="both", expand=True)
 
-        # Spalten: Datum (dd.mm.jjjj), Zeit (hh:mm), Nummer, Name, Dauer (mm:ss)
+        # Spalten: Datum (dd.mm.jjjj), Zeit (hh:mm), Nummer, Name, Kontakt, Dauer (mm:ss)
         self.log_tree = ttk.Treeview(
             log_frame,
-            columns=("date", "time", "number", "name", "duration"),
+            columns=("date", "time", "number", "name", "kontakt", "duration"),
             show="headings",
             selectmode="browse",
         )
@@ -1613,12 +1757,14 @@ class CallerIDApp:
         self.log_tree.heading("time", text="Zeit", command=lambda: self._sort_log_tree("time"))
         self.log_tree.heading("number", text="Telefonnummer", command=lambda: self._sort_log_tree("number"))
         self.log_tree.heading("name", text="Name", command=lambda: self._sort_log_tree("name"))
+        self.log_tree.heading("kontakt", text="Kontakt", command=lambda: self._sort_log_tree("kontakt"))
         self.log_tree.heading("duration", text="Dauer", command=lambda: self._sort_log_tree("duration"))
 
-        self.log_tree.column("date", width=120, anchor="center")
-        self.log_tree.column("time", width=70, anchor="center")
-        self.log_tree.column("number", width=150)
-        self.log_tree.column("name", width=220)
+        self.log_tree.column("date", width=110, anchor="center")
+        self.log_tree.column("time", width=60, anchor="center")
+        self.log_tree.column("number", width=140)
+        self.log_tree.column("name", width=180)
+        self.log_tree.column("kontakt", width=150)
         self.log_tree.column("duration", width=80, anchor="e")
 
         log_scroll = ttk.Scrollbar(
@@ -1770,22 +1916,34 @@ class CallerIDApp:
         )
         self.call_result.config(text=result)
 
-    def on_toast_name_edit(self, number, name):
-        """Vom Toast: bearbeiteten Namen im Telefonbuch speichern."""
-        if not number or not name:
+    def on_toast_name_edit(self, number, name, kontakt=None):
+        """Vom Toast: bearbeiteten Namen/Kontakt im Telefonbuch speichern."""
+        if not number:
             return
 
-        # Auch im laufenden Anrufprotokoll den Namen nachziehen.
+        contact = get_contact(number)
+        final_name = name or (contact["name"] if contact else None)
+        if not final_name:
+            return
+        if kontakt is None:
+            kontakt = (
+                contact["kontakt"]
+                if contact and "kontakt" in contact.keys()
+                else ""
+            )
+
+        # Auch im laufenden Anrufprotokoll Namen/Kontakt nachziehen.
         if (
             self.call_started_at is not None
             and normalize_phone(number)
             == normalize_phone(self.call_log_number)
         ):
-            self.call_log_name = name
+            self.call_log_name = final_name
+            self.call_log_kontakt = kontakt or ""
 
-        save_contact(number, name, source="Manuell")
+        save_contact(number, final_name, kontakt=kontakt or "", source="Manuell")
         self.refresh_lists()
-        print(f"TRACE: Name aus Toast gespeichert: {number} → {name}")
+        logger.info("Name/Kontakt aus Toast gespeichert: %s → %s / %s", number, final_name, kontakt)
 
     def _log_call_end(self):
         """Speichert den beendeten Anruf im Anrufprotokoll."""
@@ -1801,16 +1959,18 @@ class CallerIDApp:
             save_call_log(
                 self.call_log_number,
                 self.call_log_name,
+                self.call_log_kontakt,
                 self.call_started_at.strftime("%Y-%m-%d %H:%M:%S"),
                 duration_s,
             )
             self.refresh_call_log()
             print(f"TRACE: Anruf protokolliert: {self.call_log_number} "
-                  f"({self.call_log_name}), {duration_s} s")
+                  f"({self.call_log_name} / {self.call_log_kontakt}), {duration_s} s")
         except Exception as error:
             print(f"Fehler beim Protokollieren: {error}")
 
         self.call_started_at = None
+        self.call_log_kontakt = ""
 
     def process_call(self, call):
         logger.info(f"TRACE: process_call aufgerufen: call={call}, test_mode={getattr(self, 'test_mode', 'N/A')}")
@@ -1831,9 +1991,11 @@ class CallerIDApp:
             self._none_count = 0
             # Anruf nicht mehr aktiv: Anzeige und Toast ausblenden.
             logger.info("TRACE: process_call(None) – Anruf beendet, blende Toast aus")
+            # Zuerst Toast schliessen (committet offene Bearbeitungen),
+            # dann protokollieren, damit Name/Kontakt im Log landen.
+            self.toast.hide()
             self._log_call_end()
             self.set_call_display("Warte auf eingehenden Anruf ...")
-            self.toast.hide()
             logger.info("TRACE: toast.hide() ausgeführt")
 
             self.last_call_id = None
@@ -1861,6 +2023,7 @@ class CallerIDApp:
         self.last_call_id = call_id
         self.call_started_at = datetime.now()
         self.call_log_name = name or "Unbekannter Anrufer"
+        self.call_log_kontakt = ""
         self.call_log_number = number
 
         # 1. Lokales Telefonbuch hat Vorrang.
@@ -1868,12 +2031,15 @@ class CallerIDApp:
 
         if contact:
             self.call_log_name = contact["name"]
+            self.call_log_kontakt = (
+                contact["kontakt"] if "kontakt" in contact.keys() else ""
+            )
             self.set_call_display(
                 contact["name"],
                 number,
                 "Aus dem lokalen Telefonbuch geladen.",
             )
-            self.toast.show(contact["name"], number, status)
+            self.toast.show(contact["name"], number, status, self.call_log_kontakt)
             return
 
         # 2. Interne Durchwahlen nicht online suchen.
@@ -2166,11 +2332,15 @@ class CallerIDApp:
         self.edit_original_number = original_number
         self.edit_number_var.set(contact["display_number"])
         self.edit_name_var.set(contact["name"])
+        self.edit_kontakt_var.set(
+            contact["kontakt"] if "kontakt" in contact.keys() else ""
+        )
 
     def update_selected_contact(self):
         original_number = self.edit_original_number
         new_number = self.edit_number_var.get().strip()
         new_name = self.edit_name_var.get().strip()
+        new_kontakt = self.edit_kontakt_var.get().strip()
 
         if not original_number:
             messagebox.showinfo(
@@ -2210,6 +2380,7 @@ class CallerIDApp:
             save_contact(
                 new_number,
                 new_name,
+                kontakt=new_kontakt,
                 source="Manuell bearbeitet",
             )
 
@@ -2227,6 +2398,7 @@ class CallerIDApp:
 
             self.edit_number_var.set(new_number)
             self.edit_name_var.set(new_name)
+            self.edit_kontakt_var.set(new_kontakt)
 
             messagebox.showinfo(
                 "Gespeichert",
@@ -2265,6 +2437,7 @@ class CallerIDApp:
         self.edit_original_number = None
         self.edit_number_var.set("")
         self.edit_name_var.set("")
+        self.edit_kontakt_var.set("")
         self.refresh_lists()
 
     # --------------------------------------------------------
@@ -2388,10 +2561,14 @@ class CallerIDApp:
         self.current_unknown_number = normalized
         self.unknown_number_var.set(entry["display_number"])
         self.unknown_name_var.set("")
+        self.unknown_kontakt_var.set(
+            entry["kontakt"] if "kontakt" in entry.keys() else ""
+        )
 
     def save_unknown_as_contact(self):
         number = self.unknown_number_var.get().strip()
         name = self.unknown_name_var.get().strip()
+        kontakt = self.unknown_kontakt_var.get().strip()
 
         if not number:
             messagebox.showinfo(
@@ -2408,7 +2585,7 @@ class CallerIDApp:
             return
 
         try:
-            save_contact(number, name, source="Manuell")
+            save_contact(number, name, kontakt=kontakt, source="Manuell")
             self.current_unknown_number = None
             self.refresh_lists()
 
@@ -2442,6 +2619,7 @@ class CallerIDApp:
         self.current_unknown_number = None
         self.unknown_number_var.set("")
         self.unknown_name_var.set("")
+        self.unknown_kontakt_var.set("")
         self.refresh_lists()
 
     def retry_selected_lookup(self):
@@ -2476,6 +2654,7 @@ class CallerIDApp:
                 values=(
                     row["display_number"],
                     row["name"],
+                    row["kontakt"] if "kontakt" in row.keys() else "",
                     row["source"],
                 ),
             )
@@ -2495,6 +2674,7 @@ class CallerIDApp:
                 iid=row["number"],
                 values=(
                     row["display_number"],
+                    row["kontakt"] if "kontakt" in row.keys() else "",
                     row["last_seen"],
                     row["reason"],
                 ),
@@ -2533,6 +2713,7 @@ class CallerIDApp:
                     time_part,      # hh:mm
                     row["display_number"],
                     row["name"],
+                    row["kontakt"] if "kontakt" in row.keys() else "",
                     duration_text,
                 ),
             )
@@ -2548,6 +2729,8 @@ class CallerIDApp:
             return row["display_number"] or ""
         if col == "name":
             return (row["name"] or "").lower()
+        if col == "kontakt":
+            return ((row["kontakt"] if "kontakt" in row.keys() else "") or "").lower()
         if col == "duration":
             return row["duration_s"]
         return row["started_at"]
@@ -2845,6 +3028,7 @@ if __name__ == "__main__":
 
     migrate_legacy_db()
     init_db()
+    migrate_add_kontakt()
     cleanup_old_call_logs()
     first_run_csv_import()
     init_db()  # Erneut nach möglichem CSV-Import.
