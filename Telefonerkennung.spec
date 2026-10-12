@@ -4,8 +4,9 @@ import sys
 import os
 from pathlib import Path
 
-# Specc-File für --onedir Modus (KEIN onefile!)
+# Spec-File für --onedir Modus (KEIN onefile!)
 # Das vermeidet ALLE Temp-Verzeichnis-Probleme und DLL-Fehler komplett.
+# PyInstaller verwaltet python312.dll automatisch.
 
 block_cipher = None
 
@@ -38,16 +39,16 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 
-exe = EXE(
+# --onedir Modus: COLLECT statt EXE
+# Erstellt einen Ordner mit allen Dateien statt einer einzelnen EXE
+coll = COLLECT(
     pyz,
     a.scripts,
-    a.binaries,  # PyInstaller fügt automatisch die korrekte python312.dll hinzu
+    a.binaries,
     a.zipfiles,
     a.datas,
-    [],
     name='Telefonerkennung',
     debug=False,
-    bootloader_ignore_signals=False,
     strip=False,
     upx=False,  # UPX deaktiviert - verhindert DLL-Korruption
     upx_exclude=[],
