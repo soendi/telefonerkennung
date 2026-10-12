@@ -35,15 +35,6 @@ jobs:
         run: |
           $version = "${{ github.ref_name }}".TrimStart("v")
           # onedir build: dist/Telefonerkennung Ordner ist die App
-          # Debug: Ordnerstruktur anzeigen
-          Write-Host "=== dist folder ==="
-          Get-ChildItem dist -Recurse
-          Write-Host "=== Telefonerkennung folder ==="
-          if (Test-Path "dist\Telefonerkennung") {
-            Get-ChildItem dist\Telefonerkennung
-          } else {
-            Write-Error "dist\Telefonerkennung does NOT exist!"
-          }
           # ZIP für Updates erstellen
           Compress-Archive -Path "dist\Telefonerkennung\*" -DestinationPath "dist\Telefonerkennung-$version.zip" -Force
           # Auch die EXE direkt für Updates verfügbar machen

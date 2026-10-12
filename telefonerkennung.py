@@ -12,8 +12,6 @@ import threading
 import time
 import tkinter as tk
 import xml.etree.ElementTree as ET
-import zipfile
-
 from ctypes import wintypes
 
 from datetime import datetime, timedelta
@@ -80,84 +78,7 @@ UNKNOWN_NAMES = {
 
 
 # Updater-Script als String (wird bei Update im Temp-Verzeichnis geschrieben)
-UPDATER_SCRIPT = r'''
-import sys
-import os
-import time
-import subprocess
-import shutil
-import argparse
-from pathlib import Path
 
-def wait_for_process_exit(pid, timeout=30):
-    import ctypes
-    from ctypes import wintypes
-    kernel32 = ctypes.windll.kernel32
-    SYNCHRONIZE = 0x00100000
-    handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
-    if not handle:
-        return True
-    WAIT_OBJECT_0 = 0
-    result = kernel32.WaitForSingleObject(handle, timeout * 1000)
-    kernel32.CloseHandle(handle)
-    return result == 0
-
-def replace_exe(old_exe, new_exe, max_retries=10):
-    for i in range(max_retries):
-        try:
-            backup = old_exe.with_suffix(b'.exe.bak')
-            if old_exe.exists():
-                shutil.move(str(old_exe), str(backup))
-            shutil.copy2(str(new_exe), str(old_exe))
-            if backup.exists():
-                backup.unlink()
-            return True
-        except PermissionError:
-            time.sleep(0.5)
-        except Exception as e:
-            print(f"Fehler beim Ersetzen: {e}")
-            time.sleep(0.5)
-    return False
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(b'--old-pid', type=int, required=True)
-    parser.add_argument(b'--new-exe', required=True)
-    parser.add_argument(b'--target-exe', required=True)
-    parser.add_argument(b'--working-dir', required=True)
-    args = parser.parse_args()
-
-    print(f"Updater: alte PID={args.old_pid}, new={args.new_exe}, target={args.target_exe}")
-
-    if not wait_for_process_exit(args.old_pid, timeout=30):
-        print("Timeout: Alte Instanz nicht beendet")
-        return 1
-    print("Alte Instanz beendet.")
-
-    target_exe = Path(args.target_exe)
-    new_exe = Path(args.new_exe)
-    if not replace_exe(target_exe, new_exe):
-        print("FEHLER: EXE konnte nicht ersetzt werden")
-        return 1
-    print("EXE ersetzt.")
-
-    os.chdir(args.working_dir)
-    try:
-        subprocess.Popen([str(target_exe)], cwd=args.working_dir, start_new_session=True)
-        print("Neue Instanz gestartet.")
-    except Exception as e:
-        print(f"Fehler beim Starten: {e}")
-        return 1
-    return 0
-
-if __name__ == b'__main__':
-    sys.exit(main())
-'''
-
-
-# ============================================================
-# LOGGING
-# ============================================================
 
 def setup_logging():
     logger = logging.getLogger("telefonerkennung")
@@ -2595,7 +2516,7 @@ def parse_version(text):
 def check_for_update():
     """Prüft GitHub nach einer neueren Version.
 
-    Gibt (version, zip_url) zurück oder None.
+    Gibt (version, installer_url) zurück oder None.
     """
     if not GITHUB_REPO:
         return None
@@ -2615,105 +2536,56 @@ def check_for_update():
     if parse_version(tag) <= parse_version(APP_VERSION):
         return None
 
-    # ZIP-Asset suchen (Telefonerkennung-<version>.zip).
-    zip_url = None
-    expected_name = f"Telefonerkennung-{tag}.zip"
+    # Installer-Asset suchen (Telefonerkennung-Setup-<version>.exe).
+    installer_url = None
+    expected_name = f"Telefonerkennung-Setup-{tag}.exe"
     for asset in data.get("assets", []):
         if asset.get("name") == expected_name:
-            zip_url = asset.get("browser_download_url")
+            installer_url = asset.get("browser_download_url")
             break
 
-    if not zip_url:
-        logger.warning("Update %s gefunden, aber kein ZIP-Asset (%s).", tag, expected_name)
+    if not installer_url:
+        logger.warning("Update %s gefunden, aber kein Installer-Asset (%s).", tag, expected_name)
         return None
 
-    return tag, zip_url
+    return tag, installer_url
 
 
-def download_and_install_update(zip_url, version):
-    """Lädt das ZIP-Archiv herunter, ersetzt den App-Ordner atomar
-    und startet die App neu.
-
-    --onedir Modus: KEINE DLL-Probleme, KEINE Temp-Verzeichnis-Konflikte.
-    Einfach Ordner atomar ersetzen und neu starten.
+def download_and_install_update(installer_url, version):
+    """Lädt den Installer herunter und startet ihn.
+    
+    Der Installer macht alles: App beenden, Dateien ersetzen, Neustart.
     """
     global SHUTTING_DOWN_FOR_UPDATE
     try:
-        resp = requests.get(zip_url, stream=True, timeout=120)
+        resp = requests.get(installer_url, stream=True, timeout=120)
         resp.raise_for_status()
 
-        zip_path = Path(tempfile.gettempdir()) / f"Telefonerkennung-{version}.zip"
+        suffix = ".exe"
+        installer_path = Path(tempfile.gettempdir()) / f"Telefonerkennung-Setup-{version}{suffix}"
 
-        with open(zip_path, "wb") as f:
+        with open(installer_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-        logger.info("ZIP heruntergeladen: %s", zip_path)
+        logger.info("Installer heruntergeladen: %s", installer_path)
 
-        # Ziel-Ordner im Installationsverzeichnis
-        if getattr(sys, 'frozen', False):
-            target_dir = Path(sys.executable).parent
-        else:
-            target_dir = Path(__file__).parent
+        # Flag setzen: on_close beendet die App wirklich
+        global SHUTTING_DOWN_FOR_UPDATE
+        SHUTTING_DOWN_FOR_UPDATE = True
 
-        # ZIP in temporäres Verzeichnis entpacken
-        extract_dir = Path(tempfile.gettempdir()) / f"telefonerkennung-update-{version}"
-        if extract_dir.exists():
-            shutil.rmtree(extract_dir, ignore_errors=True)
-        extract_dir.mkdir(parents=True, exist_ok=True)
-
-        logger.info("Entpacke ZIP nach %s", extract_dir)
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            zf.extractall(extract_dir)
-
-        # Entpackter Ordner sollte ein einzelnes Unterverzeichnis enthalten
-        extracted_items = list(extract_dir.iterdir())
-        if len(extracted_items) == 1 and extracted_items[0].is_dir():
-            new_app_dir = extracted_items[0]
-        else:
-            new_app_dir = extract_dir
-
-        # Ziel-App-Verzeichnis
-        target_dir = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
-
-        # Atomarer Austausch: Backup -> Move -> Restart
-        logger.info("Ersetze App-Verzeichnis atomar...")
-
-        # BAT-File für atomaren Austausch + Neustart
-        bat_path = Path(tempfile.gettempdir()) / f"update-{version}.bat"
-        with open(bat_path, "w", encoding="utf-8") as f:
-            f.write(f"""@echo off
-ping -n 4 127.0.0.1 > nul
-:: Alten Ordner umbenennen (Backup)
-if exist "{target_dir}_old" rmdir /s /q "{target_dir}_old"
-rename "{target_dir}" "{target_dir}_old"
-:: Neuen Ordner verschieben
-move "{new_app_dir}" "{target_dir}"
-:: Alte Version aufräumen
-rmdir /s /q "{target_dir}_old" 2>nul
-:: App neu starten
-start "" "{target_dir}\\Telefonerkennung.exe"
-del "%~f0" 2>nul
-""")
-
-        logger.info("Starte Update-Prozess...")
-
-        # Updater starten
+        # Installer starten (macht alles: App beenden, Dateien ersetzen, Neustart)
         creationflags = (
             subprocess.CREATE_NEW_PROCESS_GROUP
             | subprocess.DETACHED_PROCESS
         )
         subprocess.Popen(
-            [str(bat_path)],
-            creationflags=creationflags,
-            shell=True
+            [str(installer_path), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
+            creationflags=creationflags
         )
 
-        logger.info("Update-Prozess gestartet, beende App sauber.")
+        logger.info("Installer gestartet, beende App sauber.")
 
-        # Flag setzen: on_close beendet die App wirklich
-        global SHUTTING_DOWN_FOR_UPDATE
-        SHUTTING_DOWN_FOR_UPDATE = True
         if _app_instance is not None:
             _app_instance.request_quit()
         else:
