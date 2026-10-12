@@ -4,16 +4,15 @@ import sys
 import os
 from pathlib import Path
 
-# Spec-File: PyInstaller verwaltet python312.dll AUTOMATISCH
-# KEINE manuelle DLL-Einbindung - PyInstaller weiß welche DLL zum Bootloader passt
-# UPX deaktiviert, damit die DLL nicht korruptiert wird
+# Specc-File für --onedir Modus (KEIN onefile!)
+# Das vermeidet ALLE Temp-Verzeichnis-Probleme und DLL-Fehler komplett.
 
 block_cipher = None
 
 a = Analysis(
     ['telefonerkennung.py'],
     pathex=[],
-    binaries=[],  # KEINE manuellen DLLs - PyInstaller macht das automatisch
+    binaries=[],  # PyInstaller verwaltet python312.dll automatisch
     datas=[
         ('telefon.ico', '.'),
     ],
@@ -42,7 +41,7 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,  # PyInstaller fügt hier automatisch die korrekte python312.dll hinzu
+    a.binaries,  # PyInstaller fügt automatisch die korrekte python312.dll hinzu
     a.zipfiles,
     a.datas,
     [],

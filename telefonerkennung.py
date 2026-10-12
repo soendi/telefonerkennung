@@ -12,6 +12,7 @@ import threading
 import time
 import tkinter as tk
 import xml.etree.ElementTree as ET
+import zipfile
 
 from ctypes import wintypes
 
@@ -32,7 +33,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.1.21"
+APP_VERSION = "3.1.22"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -2594,7 +2595,7 @@ def parse_version(text):
 def check_for_update():
     """Prüft GitHub nach einer neueren Version.
 
-    Gibt (version, installer_url) zurück oder None.
+    Gibt (version, zip_url) zurück oder None.
     """
     if not GITHUB_REPO:
         return None
@@ -2614,63 +2615,90 @@ def check_for_update():
     if parse_version(tag) <= parse_version(APP_VERSION):
         return None
 
-    # Installer-Asset suchen (Telefonerkennung-Setup-<version>.exe).
-    installer_url = None
-    expected_name = f"Telefonerkennung-Setup-{tag}.exe"
+    # ZIP-Asset suchen (Telefonerkennung-<version>.zip).
+    zip_url = None
+    expected_name = f"Telefonerkennung-{tag}.zip"
     for asset in data.get("assets", []):
         if asset.get("name") == expected_name:
-            installer_url = asset.get("browser_download_url")
+            zip_url = asset.get("browser_download_url")
             break
 
-    if not installer_url:
-        logger.warning("Update %s gefunden, aber kein Installer-Asset (%s).", tag, expected_name)
+    if not zip_url:
+        logger.warning("Update %s gefunden, aber kein ZIP-Asset (%s).", tag, expected_name)
         return None
 
-    return tag, installer_url
+    return tag, zip_url
 
 
-def download_and_install_update(installer_url, version):
-    """Lädt den Installer herunter und startet ihn mit einem BAT-File
-    für den Neustart (wie FerdlWorks).
-
-    Der Installer läuft mit /SILENT /SUPPRESSMSGBOXES /NORESTART.
-    Ein BAT-File wartet, bis die App beendet ist, führt den Installer aus
+def download_and_install_update(zip_url, version):
+    """Lädt das ZIP-Archiv herunter, ersetzt den App-Ordner atomar
     und startet die App neu.
+
+    --onedir Modus: KEINE DLL-Probleme, KEINE Temp-Verzeichnis-Konflikte.
+    Einfach Ordner atomar ersetzen und neu starten.
     """
     global SHUTTING_DOWN_FOR_UPDATE
     try:
-        resp = requests.get(installer_url, stream=True, timeout=120)
+        resp = requests.get(zip_url, stream=True, timeout=120)
         resp.raise_for_status()
 
-        suffix = ".exe"
-        installer_path = Path(tempfile.gettempdir()) / f"Telefonerkennung-Setup-{version}{suffix}"
+        zip_path = Path(tempfile.gettempdir()) / f"Telefonerkennung-{version}.zip"
 
-        with open(installer_path, "wb") as f:
+        with open(zip_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-        logger.info("Installer heruntergeladen: %s", installer_path)
+        logger.info("ZIP heruntergeladen: %s", zip_path)
 
-        # Ziel-EXE im Installationsverzeichnis
-        target_exe = Path(sys.executable)
-        if not getattr(sys, 'frozen', False):
-            target_exe = Path(__file__).with_name("Telefonerkennung.exe")
+        # Ziel-Ordner im Installationsverzeichnis
+        if getattr(sys, 'frozen', False):
+            target_dir = Path(sys.executable).parent
+        else:
+            target_dir = Path(__file__).parent
 
-        # BAT-File für Update mit Neustart (wie FerdlWorks)
-        bat_path = installer_path.with_suffix(".bat")
+        # ZIP in temporäres Verzeichnis entpacken
+        extract_dir = Path(tempfile.gettempdir()) / f"telefonerkennung-update-{version}"
+        if extract_dir.exists():
+            shutil.rmtree(extract_dir, ignore_errors=True)
+        extract_dir.mkdir(parents=True, exist_ok=True)
+
+        logger.info("Entpacke ZIP nach %s", extract_dir)
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            zf.extractall(extract_dir)
+
+        # Entpackter Ordner sollte ein einzelnes Unterverzeichnis enthalten
+        extracted_items = list(extract_dir.iterdir())
+        if len(extracted_items) == 1 and extracted_items[0].is_dir():
+            new_app_dir = extracted_items[0]
+        else:
+            new_app_dir = extract_dir
+
+        # Ziel-App-Verzeichnis
+        target_dir = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
+
+        # Atomarer Austausch: Backup -> Move -> Restart
+        logger.info("Ersetze App-Verzeichnis atomar...")
+
+        # BAT-File für atomaren Austausch + Neustart
+        bat_path = Path(tempfile.gettempdir()) / f"update-{version}.bat"
         with open(bat_path, "w", encoding="utf-8") as f:
             f.write(f"""@echo off
 ping -n 4 127.0.0.1 > nul
-start /wait "" "{installer_path}" /SILENT /SUPPRESSMSGBOXES /NORESTART
-if exist "{target_exe}" (
-    start "" "{target_exe}"
-)
+:: Alten Ordner umbenennen (Backup)
+if exist "{target_dir}_old" rmdir /s /q "{target_dir}_old"
+rename "{target_dir}" "{target_dir}_old"
+:: Neuen Ordner verschieben
+move "{new_app_dir}" "{target_dir}"
+:: Alte Version aufräumen
+rmdir /s /q "{target_dir}_old" 2>nul
+:: App neu starten
+start "" "{target_dir}\\Telefonerkennung.exe"
 del "%~f0" 2>nul
 """)
 
-        logger.info("Starte Update-Installation mit BAT-File...")
+        logger.info("Starte Update-Prozess...")
 
-        # Updater starten: BAT-File wartet, führt Installer aus, startet App neu
+        # Updater starten
         creationflags = (
             subprocess.CREATE_NEW_PROCESS_GROUP
             | subprocess.DETACHED_PROCESS
@@ -2681,7 +2709,7 @@ del "%~f0" 2>nul
             shell=True
         )
 
-        logger.info("Updater (BAT) gestartet, beende App sauber.")
+        logger.info("Update-Prozess gestartet, beende App sauber.")
 
         # Flag setzen: on_close beendet die App wirklich
         global SHUTTING_DOWN_FOR_UPDATE

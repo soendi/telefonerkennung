@@ -26,7 +26,8 @@ PrivilegesRequired=admin
 Name: "german"; MessagesFile: "compiler:Languages\German.isl"
 
 [Files]
-Source: "dist\Telefonerkennung.exe"; DestDir: "{app}"; Flags: ignoreversion
+; --onedir build: gesamter Ordnerinhalt installieren
+Source: "dist\Telefonerkennung\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\Telefonerkennung"; Filename: "{app}\Telefonerkennung.exe"; IconFilename: "{app}\Telefonerkennung.exe"
