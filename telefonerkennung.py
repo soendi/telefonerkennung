@@ -32,7 +32,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "1.3.3"
+APP_VERSION = "1.3.4"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -1774,6 +1774,10 @@ class CallerIDApp:
             return
 
         # 5. Unbekannte externe Nummer online suchen.
+        # Im Test-Modus: Toast sofort anzeigen, keine Online-Suche.
+        if self.test_mode:
+            self.toast.show(name, number)
+            return
         self.toast.show(name, number)
         self.start_lookup(number, name)
 
