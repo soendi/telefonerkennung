@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.13"
+APP_VERSION = "3.2.14"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -46,6 +46,9 @@ GITHUB_REPO = "soendi/telefonerkennung"
 
 SEARCH_CH_API_KEY = "8b09c242997465ed4ca0e9176c103767"
 SEARCH_CH_API_URL = "https://search.ch/tel/api/"
+
+# API-Kontingent pro Monat (Reset jeweils am 1.).
+API_QUOTA_MONTHLY = 100
 
 POLL_INTERVAL_MS = 1000
 GUI_QUEUE_INTERVAL_MS = 100
@@ -250,6 +253,52 @@ def init_db():
                 duration_s INTEGER NOT NULL
             )
         """)
+
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS api_quota (
+                month TEXT PRIMARY KEY,
+                remaining INTEGER NOT NULL
+            )
+        """)
+
+
+def _api_quota_month():
+    return datetime.now().strftime("%Y-%m")
+
+
+def get_api_quota():
+    """Verbleibendes API-Kontingent des laufenden Monats (Start: 100)."""
+    with connect_db() as db:
+        row = db.execute(
+            "SELECT remaining FROM api_quota WHERE month = ?",
+            (_api_quota_month(),),
+        ).fetchone()
+        return row["remaining"] if row else API_QUOTA_MONTHLY
+
+
+def decrement_api_quota():
+    """Zieht 1 vom Monatskontingent ab (neuer Monat -> Reset auf 100).
+    Gibt den Restbestand zurück."""
+    month = _api_quota_month()
+    with connect_db() as db:
+        row = db.execute(
+            "SELECT remaining FROM api_quota WHERE month = ?",
+            (month,),
+        ).fetchone()
+        if row is None:
+            db.execute("DELETE FROM api_quota")
+            remaining = API_QUOTA_MONTHLY - 1
+            db.execute(
+                "INSERT INTO api_quota (month, remaining) VALUES (?, ?)",
+                (month, remaining),
+            )
+        else:
+            remaining = max(0, row["remaining"] - 1)
+            db.execute(
+                "UPDATE api_quota SET remaining = ? WHERE month = ?",
+                (remaining, month),
+            )
+    return remaining
 
 
 def migrate_add_kontakt():
@@ -1254,6 +1303,7 @@ class CallerIDApp:
 
         self.build_ui()
         self.refresh_lists()
+        self.refresh_api_quota()
 
         # GUI-Queue regelmässig im GUI-Thread abarbeiten.
         self.root.after(GUI_QUEUE_INTERVAL_MS, self.process_ui_queue)
@@ -1492,6 +1542,14 @@ class CallerIDApp:
             text=f"Lokale Datenbank: {DB_FILE}",
             wraplength=760,
         ).pack(side="bottom", pady=8)
+
+        self.api_quota_var = tk.StringVar()
+        ttk.Label(
+            self.call_tab,
+            textvariable=self.api_quota_var,
+            font=("Segoe UI", 10, "bold"),
+            wraplength=760,
+        ).pack(side="bottom", pady=(8, 0))
 
         # TAB: Telefonbuch
         self.book_tab = ttk.Frame(self.tabs, padding=10)
@@ -2164,6 +2222,11 @@ class CallerIDApp:
 
         if status == "found":
             save_contact(number, data, source="search.ch")
+            # Nur Treffer kosten Kontingent.
+            try:
+                decrement_api_quota()
+            except Exception as error:
+                logger.warning("API-Kontingent konnte nicht aktualisiert werden: %s", error)
 
             if (
                 self.last_call_id is not None
@@ -2219,6 +2282,7 @@ class CallerIDApp:
                     )
 
         self.refresh_lists()
+        self.refresh_api_quota()
 
     # --------------------------------------------------------
     # DURCHWAHL-TREFFER MANUELL ÜBERNEHMEN
@@ -2397,7 +2461,7 @@ class CallerIDApp:
                 new_number,
                 new_name,
                 kontakt=new_kontakt,
-                source="Manuell bearbeitet",
+                source="Manuell",
             )
 
             # Falls sich die Nummer geändert hat, alten Eintrag löschen.
@@ -2655,6 +2719,16 @@ class CallerIDApp:
     # --------------------------------------------------------
     # TABELLEN AKTUALISIEREN
     # --------------------------------------------------------
+
+    def refresh_api_quota(self):
+        """Aktualisiert die Kontingent-Anzeige (Hauptthread)."""
+        try:
+            remaining = get_api_quota()
+        except Exception:
+            remaining = API_QUOTA_MONTHLY
+        self.api_quota_var.set(
+            f"Noch verfügbare API-Abfragen diesen Monat: {remaining}"
+        )
 
     def refresh_lists(self):
         selected_contact = self.edit_original_number
