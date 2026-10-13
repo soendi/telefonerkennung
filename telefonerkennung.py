@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.17"
+APP_VERSION = "3.2.18"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -452,7 +452,7 @@ def add_unknown(number, reason):
                 display_number = excluded.display_number,
                 last_seen = excluded.last_seen,
                 reason = excluded.reason
-        """, (normalized, number, timestamp, timestamp, reason))
+        """, (normalized, format_international(number), timestamp, timestamp, reason))
 
 
 def delete_unknown(number):
@@ -507,7 +507,7 @@ def save_call_log(number, name, kontakt, started_at, duration_s):
             VALUES (?, ?, ?, ?, ?, ?)
         """, (
             normalize_phone(number),
-            number,
+            format_international(number),
             name or "Unbekannter Anrufer",
             kontakt or "",
             started_at,
