@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.15"
+APP_VERSION = "3.2.16"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -423,8 +423,22 @@ def get_all_contacts():
         return db.execute("""
             SELECT number, display_number, name, kontakt, source, updated_at
             FROM phonebook
-            ORDER BY name COLLATE NOCASE
+            ORDER BY updated_at DESC
         """).fetchall()
+
+
+def to_tel_uri(number):
+    """Baut einen tel:-Link für Click-to-Dial (z. B. tel:+41719991224)."""
+    digits = digits_only(number or "")
+    if digits.startswith("0041"):
+        digits = digits[4:]
+    elif digits.startswith("41") and len(digits) == 11:
+        digits = digits[2:]
+    elif digits.startswith("0") and len(digits) == 10:
+        digits = digits[1:]
+    if not digits:
+        return ""
+    return f"tel:+41{digits}"
 
 
 def get_all_unknown():
@@ -662,6 +676,8 @@ def create_tray_image():
 ACTIVE_CALL_STATUSES = {
     "Ankommender Anruf",
     "Verbunden",
+    "Verbindung aufgebaut",
+    "Anrufen",
     "Aktiv",
     "Im Gespräch",
     "Gespräch",
@@ -669,6 +685,8 @@ ACTIVE_CALL_STATUSES = {
     "Active",
     "In Call",
 }
+# Hinweis: "Anruf beendet" gehört bewusst NICHT dazu – dann ist
+# kein Anruf mehr aktiv und der Toast wird ausgeblendet.
 
 # Letzter gesehener Swisscom-Status (für Log bei unbekanntem Status).
 _last_swisscom_status = None
@@ -1167,6 +1185,83 @@ class CallToast:
 # SWISSCOM-OBERFLÄCHE AUSLESEN
 # ============================================================
 
+SWISSCOM_TREE_LOG = LOG_DIR / "swisscom_ui_tree.log"
+SWISSCOM_TREE_MAX_ELEMENTS = 3000
+SWISSCOM_TREE_MAX_DEPTH = 10
+
+
+def _swisscom_tree_lines(element, depth, lines):
+    """Sammelt eine Zeile pro UI-Element (rekursiv, begrenzt)."""
+    if len(lines) >= SWISSCOM_TREE_MAX_ELEMENTS:
+        return True
+    if depth > SWISSCOM_TREE_MAX_DEPTH:
+        return False
+    try:
+        info = element.element_info
+        try:
+            text = (element.window_text() or "").strip().replace("\n", " ")
+        except Exception:
+            text = ""
+        if len(text) > 120:
+            text = text[:117] + "..."
+        try:
+            rect = element.rectangle()
+            geom = f"{rect.left},{rect.top},{rect.right},{rect.bottom}"
+        except Exception:
+            geom = ""
+        lines.append(
+            f"{'  ' * depth}[{info.control_type}] "
+            f"id={info.automation_id!r} name={info.name!r} "
+            f"text={text!r} rect={geom}"
+        )
+    except Exception as error:
+        lines.append(f"{'  ' * depth}<lesefehler: {error}>")
+        return False
+    try:
+        children = element.children()
+    except Exception:
+        return False
+    for child in children:
+        if _swisscom_tree_lines(child, depth + 1, lines):
+            return True
+    return False
+
+
+def dump_swisscom_ui_tree():
+    """Schreibt einmalig den Swisscom-Fensterbaum nach swisscom_ui_tree.log.
+
+    Nur wenn die Swisscom-UI läuft und die Datei noch nicht existiert.
+    Gibt True zurück, wenn geschrieben wurde.
+    """
+    try:
+        if SWISSCOM_TREE_LOG.exists():
+            return False
+        window = Desktop(backend="uia").window(
+            title_re=f".*{APP_TITLE}.*"
+        )
+        if not window.exists(timeout=2):
+            return False
+        lines = [
+            f"# Swisscom UI-Baum ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})",
+            f"# Fenster: {APP_TITLE}",
+        ]
+        _swisscom_tree_lines(window, 0, lines)
+        lines.append(f"# Elemente: {len(lines) - 2}")
+        SWISSCOM_TREE_LOG.write_text("\n".join(lines), encoding="utf-8")
+        logger.info("Swisscom UI-Baum gespeichert: %s", SWISSCOM_TREE_LOG)
+        return True
+    except Exception as error:
+        logger.warning(
+            "Swisscom UI-Baum konnte nicht gespeichert werden: %s", error
+        )
+        return False
+
+
+def maybe_dump_swisscom_ui_tree():
+    """Startet den einmaligen UI-Dump im Hintergrund (blockiert Start nicht)."""
+    threading.Thread(target=dump_swisscom_ui_tree, daemon=True).start()
+
+
 def get_incoming_call():
     """
     Liest den aktuellen eingehenden Anruf aus.
@@ -1564,6 +1659,16 @@ class CallerIDApp:
         book_frame = ttk.Frame(self.book_tab)
         book_frame.pack(fill="both", expand=True)
 
+        filter_frame = ttk.Frame(book_frame)
+        filter_frame.pack(fill="x", pady=(0, 6))
+        ttk.Label(filter_frame, text="Filter:").pack(side="left")
+        self.book_filter_var = tk.StringVar()
+        filter_entry = ttk.Entry(filter_frame, textvariable=self.book_filter_var)
+        filter_entry.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        self.book_filter_var.trace_add(
+            "write", lambda *a: self.refresh_lists()
+        )
+
         self.book_tree = ttk.Treeview(
             book_frame,
             columns=("number", "name", "kontakt", "source"),
@@ -1594,6 +1699,11 @@ class CallerIDApp:
         self.book_tree.bind(
             "<<TreeviewSelect>>",
             self.on_contact_selected,
+        )
+        # Doppelklick wählt die Nummer (tel:-Link ans System).
+        self.book_tree.bind(
+            "<Double-Button-1>",
+            self.dial_selected_contact,
         )
 
         # Bearbeitungsfelder
@@ -2520,6 +2630,35 @@ class CallerIDApp:
         self.edit_kontakt_var.set("")
         self.refresh_lists()
 
+    def dial_selected_contact(self, _event=None):
+        """Doppelklick im Telefonbuch: Nummer per tel:-Link wählen lassen."""
+        selected = self.book_tree.selection()
+
+        if not selected:
+            return "break"
+
+        contact = get_contact(selected[0])
+
+        if not contact:
+            return "break"
+
+        uri = to_tel_uri(contact["display_number"] or selected[0])
+
+        if not uri:
+            return "break"
+
+        try:
+            os.startfile(uri)
+            logger.info("Wahl gestartet: %s", uri)
+        except OSError as error:
+            logger.error("Wählen fehlgeschlagen: %s", error)
+            messagebox.showwarning(
+                "Wählen nicht möglich",
+                "Kein Telefonie-Programm für tel:-Links registriert.\n"
+                f"Nummer: {contact['display_number']}",
+            )
+        return "break"
+
     # --------------------------------------------------------
     # TELEFONBUCH EXPORT / IMPORT (CSV)
     # --------------------------------------------------------
@@ -2547,7 +2686,7 @@ class CallerIDApp:
         try:
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f, delimiter=";")
-                writer.writerow(["Nummer", "Name", "Quelle"])
+                writer.writerow(["Nummer", "Name", "Kontakt", "Quelle"])
                 for row in contacts:
                     # ="..." schützt die Nummer vor Excel,
                     # das sonst das führende + entfernt.
@@ -2555,7 +2694,7 @@ class CallerIDApp:
                     if num and num[0] in "+0":
                         num = f'="{num}"'
                     writer.writerow(
-                        [num, row["name"], row["source"]]
+                        [num, row["name"], row["kontakt"], row["source"]]
                     )
         except OSError as e:
             messagebox.showerror("Export fehlgeschlagen", str(e))
@@ -2580,12 +2719,17 @@ class CallerIDApp:
                 reader = csv.reader(f, delimiter=";")
                 header = next(reader, None)
 
-                # Header optional überspringen
+                # Header optional überspringen; Kontakt-Spalte erkennen
+                # (neues Format: Nummer;Name;Kontakt;Quelle).
+                has_kontakt = False
                 if header and "nummer" not in (header[0] or "").lower():
                     # Erste Zeile war keine Header-Zeile → als Daten behandeln
                     rows = [header] + list(reader)
                 else:
                     rows = list(reader)
+                    has_kontakt = bool(header) and any(
+                        "kontakt" in (h or "").lower() for h in header
+                    )
         except (OSError, csv.Error) as e:
             messagebox.showerror("Import fehlgeschlagen", str(e))
             return
@@ -2599,7 +2743,12 @@ class CallerIDApp:
 
             number = (row[0] or "").strip()
             name = (row[1] or "").strip()
-            source = (row[2].strip() if len(row) > 2 and row[2] else "Import")
+            if has_kontakt:
+                kontakt = (row[2] or "").strip() if len(row) > 2 else ""
+                source = (row[3].strip() if len(row) > 3 and row[3] else "Import")
+            else:
+                kontakt = ""
+                source = (row[2].strip() if len(row) > 2 and row[2] else "Import")
 
             # Excel-Schutz ="..." wieder entfernen.
             if number.startswith('="') and number.endswith('"'):
@@ -2610,7 +2759,7 @@ class CallerIDApp:
                 continue
 
             try:
-                save_contact(number, name, source=source)
+                save_contact(number, name, kontakt=kontakt, source=source)
                 imported += 1
             except ValueError:
                 skipped += 1
@@ -2732,11 +2881,26 @@ class CallerIDApp:
 
     def refresh_lists(self):
         selected_contact = self.edit_original_number
+        book_filter = ""
+        try:
+            book_filter = self.book_filter_var.get().strip().casefold()
+        except Exception:
+            pass
 
         for item in self.book_tree.get_children():
             self.book_tree.delete(item)
 
         for row in get_all_contacts():
+            if book_filter:
+                haystack = " ".join([
+                    row["number"] or "",
+                    row["display_number"] or "",
+                    row["name"] or "",
+                    row["kontakt"] if "kontakt" in row.keys() else "",
+                    row["source"] or "",
+                ]).casefold()
+                if book_filter not in haystack:
+                    continue
             self.book_tree.insert(
                 "",
                 "end",
@@ -2874,7 +3038,7 @@ def first_run_csv_import():
         "Erster Start",
         "Willkommen! Es wurde noch keine Datenbank gefunden.\n\n"
         "Möchten Sie jetzt ein Telefonbuch aus einer CSV-Datei importieren?\n"
-        "(Spalten: Nummer;Name;Quelle)",
+        "(Spalten: Nummer;Name;Kontakt;Quelle)",
     ):
         path = filedialog.askopenfilename(
             title="Telefonbuch-CSV auswählen",
@@ -2888,8 +3052,12 @@ def first_run_csv_import():
                     header = next(reader, None)
                     if header and "nummer" not in (header[0] or "").lower():
                         rows = [header] + list(reader)
+                        has_kontakt = False
                     else:
                         rows = list(reader)
+                        has_kontakt = bool(header) and any(
+                            "kontakt" in (h or "").lower() for h in header
+                        )
 
                 imported = 0
                 for row in rows:
@@ -2897,18 +3065,27 @@ def first_run_csv_import():
                         continue
                     number = (row[0] or "").strip()
                     name = (row[1] or "").strip()
-                    source = (
-                        row[2].strip()
-                        if len(row) > 2 and row[2]
-                        else "Import"
-                    )
+                    if has_kontakt:
+                        kontakt = (row[2] or "").strip() if len(row) > 2 else ""
+                        source = (
+                            row[3].strip()
+                            if len(row) > 3 and row[3]
+                            else "Import"
+                        )
+                    else:
+                        kontakt = ""
+                        source = (
+                            row[2].strip()
+                            if len(row) > 2 and row[2]
+                            else "Import"
+                        )
                     # Excel-Schutz ="..." wieder entfernen.
                     if number.startswith('="') and number.endswith('"'):
                         number = number[2:-1]
                     if not number or not name:
                         continue
                     try:
-                        save_contact(number, name, source=source)
+                        save_contact(number, name, kontakt=kontakt, source=source)
                         imported += 1
                     except ValueError:
                         pass
@@ -3126,6 +3303,10 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = CallerIDApp(root)
     _app_instance = app
+
+    # Einmalig Swisscom UI-Baum sichern (nur wenn Swisscom läuft
+    # und swisscom_ui_tree.log noch nicht existiert).
+    maybe_dump_swisscom_ui_tree()
 
     # Update-Check im Hintergrund; GUI-Dialoge im Hauptthread via after().
     def _update_check_worker():
