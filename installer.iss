@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-#define MyAppVersion "3.2.14"
+#define MyAppVersion "3.2.15"
 #endif
 
 [Setup]
@@ -49,11 +49,28 @@ Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Filename: "{app}\Telefonerkennung.exe"; Flags: nowait postinstall runasoriginaluser
 
 [Code]
+const
+  // Deinstallations-Schlüssel unserer AppId ({{ verdoppelt = literales {).
+  AppUninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{{B7E3F2A1-4C5D-4E8F-9A2B-1D3C5E7F9A0B}_is1';
+
+procedure CleanOrphanedPerUserEntry();
+begin
+  // Wir installieren immer per-machine (HKLM). Ein Eintrag im
+  // Benutzer-Hive (HKCU) stammt aus der alten Per-User-Ära und zeigt
+  // dauerhaft eine veraltete Version an – bei jedem Update entfernen.
+  if RegKeyExists(HKCU, AppUninstallKey) then
+  begin
+    RegDeleteKeyIncludingSubkeys(HKCU, AppUninstallKey);
+  end;
+end;
+
 function InitializeSetup(): Boolean;
 var
   ResultCode: Integer;
 begin
   // App gnadenlos killen VOR Installation
   Exec('cmd.exe', '/C taskkill /F /IM Telefonerkennung.exe 2>nul', '', SW_HIDE, ewNoWait, ResultCode);
+  // Verwaisten Per-User-Deinstallations-Eintrag entfernen
+  CleanOrphanedPerUserEntry();
   Result := True;
 end;
