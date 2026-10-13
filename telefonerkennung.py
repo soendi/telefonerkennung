@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.16"
+APP_VERSION = "3.2.17"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -186,6 +186,27 @@ def format_phone_display(number):
     return raw
 
 
+def format_international(number):
+    """Schweizer Nummern immer als +41 XX XXX XX XX (nicht-CH unverändert)."""
+    raw = (number or "").strip()
+    digits = digits_only(raw)
+
+    if not digits:
+        return raw
+
+    if digits.startswith("0041"):
+        digits = digits[4:]
+    elif digits.startswith("41") and len(digits) == 11:
+        digits = digits[2:]
+    elif digits.startswith("0") and len(digits) == 10:
+        digits = digits[1:]
+
+    if len(digits) == 9:
+        return f"+41 {digits[0:2]} {digits[2:5]} {digits[5:7]} {digits[7:9]}"
+
+    return raw
+
+
 def is_real_name(name):
     return (name or "").strip().casefold() not in UNKNOWN_NAMES
 
@@ -202,6 +223,15 @@ def is_number_text(text):
         return False
 
     return len(digits_only(text)) >= 3
+
+
+CALL_TIMER_RE = re.compile(r"^\d{1,3}:\d{2}(:\d{2})?$")
+
+
+def is_call_timer(text):
+    """Erkennt den Swisscom-Gesprächszähler (z. B. 00:02) –
+    weder Name noch Nummer."""
+    return bool(CALL_TIMER_RE.match((text or "").strip()))
 
 
 def xml_local_name(tag):
@@ -323,6 +353,29 @@ def migrate_add_kontakt():
             )
 
 
+def migrate_international_format():
+    """Stellt Anzeige-Nummern auf internationales Format um (+41 XX XXX XX XX)."""
+    try:
+        with connect_db() as db:
+            for table in ("phonebook", "unknown_numbers", "call_log"):
+                try:
+                    rows = db.execute(
+                        f"SELECT number, display_number FROM {table}"
+                    ).fetchall()
+                except Exception:
+                    continue
+                for row in rows:
+                    new_display = format_international(row["display_number"])
+                    if new_display != row["display_number"]:
+                        db.execute(
+                            f"UPDATE {table} SET display_number = ? "
+                            "WHERE number = ?",
+                            (new_display, row["number"]),
+                        )
+    except Exception as error:
+        logger.error("DB-Migration Nummernformat fehlgeschlagen: %s", error)
+
+
 def get_contact(number):
     with connect_db() as db:
         return db.execute(
@@ -374,7 +427,7 @@ def save_contact(number, name, kontakt=None, source="Manuell"):
                 kontakt = excluded.kontakt,
                 source = excluded.source,
                 updated_at = excluded.updated_at
-        """, (normalized, number, name, kontakt, source, now()))
+        """, (normalized, format_international(number), name, kontakt, source, now()))
 
         db.execute(
             "DELETE FROM unknown_numbers WHERE number = ?",
@@ -427,18 +480,14 @@ def get_all_contacts():
         """).fetchall()
 
 
-def to_tel_uri(number):
-    """Baut einen tel:-Link für Click-to-Dial (z. B. tel:+41719991224)."""
+def to_dial_number(number):
+    """Nummer in der Form für das Swisscom-Wählfeld (national, z. B. 0717871412)."""
     digits = digits_only(number or "")
     if digits.startswith("0041"):
-        digits = digits[4:]
+        digits = "0" + digits[4:]
     elif digits.startswith("41") and len(digits) == 11:
-        digits = digits[2:]
-    elif digits.startswith("0") and len(digits) == 10:
-        digits = digits[1:]
-    if not digits:
-        return ""
-    return f"tel:+41{digits}"
+        digits = "0" + digits[2:]
+    return digits
 
 
 def get_all_unknown():
@@ -557,27 +606,38 @@ def reverse_lookup(number, allow_suffix_search=False):
 
         # Immer zuerst die vollständige Nummer abfragen.
         results = query_directory(number)
-        exact_matches = {}
+        exact_names = {}
+        exact_pairs = []
 
         for phone, name in results:
             if (
                 normalize_phone(phone) == wanted
                 and is_real_name(name)
             ):
-                exact_matches.setdefault(name.casefold(), name)
+                if name.casefold() not in exact_names:
+                    exact_names[name.casefold()] = name
+                    exact_pairs.append((phone, name))
 
-        if len(exact_matches) == 1:
+        if len(exact_pairs) == 1:
             return (
                 "found",
-                next(iter(exact_matches.values())),
+                exact_pairs[0][1],
                 "Eindeutiger Treffer für die vollständige Nummer.",
             )
 
-        if len(exact_matches) > 1:
+        if len(exact_pairs) > 1:
+            # Mehrere Namen: Auswahl-Dialog statt stiller Ablage.
             return (
-                "ambiguous",
-                None,
-                "Mehrere Namen für die vollständige Nummer gefunden.",
+                "candidates",
+                sorted(
+                    exact_pairs,
+                    key=lambda item: (
+                        normalize_phone(item[0]),
+                        item[1].casefold(),
+                    ),
+                ),
+                "Mehrere Namen für die vollständige Nummer gefunden – "
+                "bitte auswählen.",
             )
 
         if not allow_suffix_search:
@@ -714,6 +774,27 @@ class CallToast:
         content = tk.Frame(frame, bg="#1e1e1e")
         content.pack(side="left", fill="both", expand=True, padx=12, pady=10)
 
+        self.candidates_frame = tk.Frame(content, bg="#1e1e1e")
+        # Wird nur gepackt, wenn Treffer zur Auswahl stehen.
+
+        self.candidates_title = tk.Label(
+            self.candidates_frame, text="Mehrere Treffer:",
+            fg="#888888", bg="#1e1e1e",
+            font=("Segoe UI", 9), anchor="w",
+        )
+        self.candidates_title.pack(fill="x")
+
+        self.candidates_rows_frame = tk.Frame(
+            self.candidates_frame, bg="#1e1e1e"
+        )
+        self.candidates_rows_frame.pack(fill="x", pady=(2, 0))
+        self.candidate_labels = []
+
+        self.candidates_sep = tk.Frame(
+            self.candidates_frame, bg="#444444", height=1
+        )
+        self.candidates_sep.pack(fill="x", pady=(6, 6))
+
         self.title_label = tk.Label(
             content, text="Eingehender Anruf",
             fg="#888888", bg="#1e1e1e",
@@ -777,6 +858,10 @@ class CallToast:
         self._visible = False
         self._connected = False
         self._title_prefix = "Eingehender Anruf"
+        self._candidates = []
+        self._candidates_number = None
+        self._candidates_callback = None
+        self._candidates_selected = None
 
         for widget in (frame, content, self.title_label,
                        self.kontakt_label, self.number_label):
@@ -903,6 +988,8 @@ class CallToast:
 
     def show(self, name, number, status=None, kontakt=""):
         logger.info("TOAST SHOW aufgerufen: name=%s, number=%s, status=%r", name, number, status)
+        # Alten Anrufzustand (inkl. Trefferliste) zurücksetzen.
+        self.clear_candidates()
         # Restlichen Editierzustand zurücksetzen.
         if self._editing:
             self._cancel_edit()
@@ -1009,8 +1096,163 @@ class CallToast:
             return
         self.name_label.config(text=name or "Unbekannter Anrufer")
 
+    def set_candidates_callback(self, callback):
+        """callback(original_number, candidate_number, candidate_name)."""
+        self._candidates_callback = callback
+
+    def show_candidates(self, original_number, candidates):
+        """Zeigt Trefferliste oben im Toast (Doppelklick wählt) –
+        wächst animiert nach unten."""
+        self._stop_anim()
+        self._candidates = list(candidates or [])
+        self._candidates_number = original_number
+        try:
+            start_h = self.window.winfo_height()
+        except Exception:
+            start_h = 0
+        try:
+            for label in self.candidate_labels:
+                label.destroy()
+            self.candidate_labels = []
+            self._candidates_selected = None
+            for index, (candidate_number, candidate_name) in enumerate(
+                self._candidates
+            ):
+                label = tk.Label(
+                    self.candidates_rows_frame, text=candidate_name,
+                    fg="white", bg="#1e1e1e",
+                    font=("Segoe UI", 11), anchor="w",
+                )
+                label.pack(fill="x")
+                label.bind(
+                    "<Button-1>",
+                    lambda event, i=index: self._select_candidate_row(i),
+                )
+                label.bind(
+                    "<Double-Button-1>",
+                    lambda event, i=index: self._pick_candidate_index(i),
+                )
+                self.candidate_labels.append(label)
+        except Exception:
+            pass
+        try:
+            self.candidates_frame.pack(fill="x", before=self.title_label)
+        except Exception:
+            try:
+                self.candidates_frame.pack(fill="x")
+            except Exception:
+                pass
+        self._calc_target()
+        self._animate_height(start_h or self._target_h, self._target_h)
+        self.window.deiconify()
+        self.window.lift()
+        self._force_topmost()
+
+    def clear_candidates(self, animate=False):
+        self._candidates = []
+        self._candidates_number = None
+        self._candidates_selected = None
+        try:
+            for label in self.candidate_labels:
+                label.destroy()
+            self.candidate_labels = []
+            self.candidates_frame.pack_forget()
+        except Exception:
+            pass
+        if not animate:
+            return
+        # Fenster ist noch auf alter (grosser) Höhe, Inhalt schon weg:
+        # Höhe animiert schrumpfen.
+        self.window.update_idletasks()
+        end_h = self.window.winfo_reqheight()
+        if not end_h or end_h < 50:
+            end_h = 140
+        if end_h > 600:
+            end_h = 600
+        self._target_h = end_h
+        try:
+            start_h = self.window.winfo_height()
+        except Exception:
+            return
+        self._animate_height(start_h, end_h)
+
+    def _animate_height(self, start_h, end_h):
+        """Animiert nur die Fensterhöhe (oben angedockt)."""
+        self._stop_anim()
+        try:
+            start_h = int(start_h)
+            end_h = int(end_h)
+        except Exception:
+            return
+        x = self._target_x
+        y = self._target_y
+        if start_h == end_h:
+            try:
+                self.window.geometry(f"400x{end_h}+{x}+{y}")
+            except Exception:
+                pass
+            return
+        steps = 8
+
+        def step(i):
+            try:
+                progress = 1 - (1 - i / steps) ** 2
+                h = int(start_h + (end_h - start_h) * progress)
+                self.window.geometry(f"400x{h}+{x}+{y}")
+                if i < steps:
+                    self._anim_after_id = self.window.after(
+                        12, step, i + 1
+                    )
+                else:
+                    self._anim_after_id = None
+                    self.window.geometry(f"400x{end_h}+{x}+{y}")
+                    self.window.deiconify()
+                    self.window.lift()
+                    self._force_topmost()
+            except Exception as e:
+                logger.error("TOAST Animationsfehler: %s", e)
+                try:
+                    self.window.geometry(f"400x{end_h}+{x}+{y}")
+                    self.window.deiconify()
+                    self.window.lift()
+                    self._force_topmost()
+                except Exception:
+                    pass
+                self._anim_after_id = None
+
+        step(0)
+
+    def _select_candidate_row(self, index):
+        """Markiert eine Trefferzeile (Einfachklick)."""
+        try:
+            self._candidates_selected = index
+            for i, label in enumerate(self.candidate_labels):
+                label.config(
+                    bg="#0052a5" if i == index else "#1e1e1e"
+                )
+        except Exception:
+            pass
+
+    def _pick_candidate_index(self, index):
+        """Wählt einen Treffer per Doppelklick."""
+        try:
+            candidate_number, candidate_name = self._candidates[index]
+        except (IndexError, ValueError, TypeError):
+            return "break"
+        if self._candidates_callback:
+            try:
+                self._candidates_callback(
+                    self._candidates_number,
+                    candidate_number,
+                    candidate_name,
+                )
+            except Exception:
+                pass
+        return "break"
+
     def hide(self):
         self._visible = False
+        self.clear_candidates()
         self._stop_ticker()
 
         # Editierten Namen/Kontakt speichern, bevor das Fenster schliesst.
@@ -1297,7 +1539,7 @@ def get_incoming_call():
             if status is not None and panel is not None and status not in ACTIVE_CALL_STATUSES:
                 logger.info("*** Swisscom-Status (kein aktiver Anruf): %r ***", status)
 
-        if status not in ACTIVE_CALL_STATUSES or panel is None:
+        if panel is None:
             return None
 
         texts = []
@@ -1310,6 +1552,7 @@ def get_incoming_call():
                     if (
                         value
                         and value != status
+                        and not is_call_timer(value)
                         and value not in texts
                     ):
                         texts.append(value)
@@ -1334,6 +1577,19 @@ def get_incoming_call():
             ),
             "Unbekannter Anrufer",
         )
+
+        if status == "Anruf beendet":
+            # Explizites Anrufende (Nummer noch sichtbar):
+            # sofort beenden statt auf Leer-Polls zu warten.
+            return {
+                "name": name,
+                "nummer": number,
+                "status": status,
+                "ended": True,
+            }
+
+        if status not in ACTIVE_CALL_STATUSES:
+            return None
 
         return {"name": name, "nummer": number, "status": status}
 
@@ -1388,6 +1644,7 @@ class CallerIDApp:
             lambda: self.ui_queue.put(("tray", "open"))
         )
         self.toast.set_edit_callback(self.on_toast_name_edit)
+        self.toast.set_candidates_callback(self.on_toast_candidate_picked)
 
         self.tray_icon = None
         self.setup_tray()
@@ -1430,6 +1687,10 @@ class CallerIDApp:
                     self.on_tray_test,
                 ),
                 pystray.MenuItem(
+                    "Ausgehenden Testanruf simulieren",
+                    self.on_tray_test_outgoing,
+                ),
+                pystray.MenuItem(
                     "Auf Updates prüfen",
                     self.on_tray_update_check,
                 ),
@@ -1458,6 +1719,10 @@ class CallerIDApp:
     def on_tray_test(self):
         logger.info("TEST: on_tray_test aufgerufen")
         self.ui_queue.put(("tray", "test"))
+
+    def on_tray_test_outgoing(self):
+        logger.info("TEST: on_tray_test_outgoing aufgerufen")
+        self.ui_queue.put(("tray", "test_outgoing"))
 
     def on_tray_update_check(self):
         self.ui_queue.put(("tray", "update_check"))
@@ -1514,6 +1779,43 @@ class CallerIDApp:
 
         # Test-Daten sofort in Queue legen, damit Toast sofort angezeigt wird
         self.ui_queue.put(("poll", self.test_call_data))
+
+        # Testanruf nach 15 Sekunden automatisch beenden.
+        self.root.after(15000, self.end_test_call)
+        logger.info("TEST: after(15000, end_test_call) gesetzt")
+
+    def simulate_outgoing_call(self):
+        """Simuliert einen ausgehenden Anruf: erst Wählen (Anrufen),
+        dann verbunden – mit Zähler als Name, exakt wie Swisscom."""
+        logger.info(
+            f"TEST: simulate_outgoing_call aufgerufen, test_mode={self.test_mode}"
+        )
+        if self.test_mode:
+            logger.info("TEST: test_mode bereits aktiv, breche ab")
+            return
+
+        self.test_mode = True
+        self.test_call_data = {
+            "name": "Unbekannter Anrufer",
+            "nummer": "+41717871412",
+            "status": "Anrufen",
+        }
+        logger.info(f"TEST: test_mode gesetzt, Daten={self.test_call_data}")
+
+        # Test-Daten sofort in Queue legen, damit Toast sofort angezeigt wird
+        self.ui_queue.put(("poll", self.test_call_data))
+
+        # Nach 4 Sekunden: verbunden, Zähler als Name (wie Swisscom).
+        def _to_connected():
+            if self.test_mode:
+                self.test_call_data = {
+                    "name": "00:00",
+                    "nummer": "+41717871412",
+                    "status": "Verbindung aufgebaut",
+                }
+                logger.info("TEST: Wechsel zu verbunden (Zähler als Name)")
+
+        self.root.after(4000, _to_connected)
 
         # Testanruf nach 15 Sekunden automatisch beenden.
         self.root.after(15000, self.end_test_call)
@@ -1700,7 +2002,7 @@ class CallerIDApp:
             "<<TreeviewSelect>>",
             self.on_contact_selected,
         )
-        # Doppelklick wählt die Nummer (tel:-Link ans System).
+        # Doppelklick wählt die Nummer direkt in Swisscom.
         self.book_tree.bind(
             "<Double-Button-1>",
             self.dial_selected_contact,
@@ -1976,6 +2278,8 @@ class CallerIDApp:
                         self.show_settings()
                     elif event[1] == "test":
                         self.simulate_call()
+                    elif event[1] == "test_outgoing":
+                        self.simulate_outgoing_call()
                     elif event[1] == "update_check":
                         self.start_update_check()
                     elif event[1] == "exit":
@@ -2113,6 +2417,33 @@ class CallerIDApp:
         self.refresh_lists()
         logger.info("Name/Kontakt aus Toast gespeichert: %s → %s / %s", number, final_name, kontakt)
 
+    def on_toast_candidate_picked(self, original_number, candidate_number, candidate_name):
+        """Doppelklick auf Treffer im Toast: direkt übernehmen (ohne Rückfrage)."""
+        if not original_number or not candidate_name:
+            return
+        # Absichtlich die eingehende Nummer speichern,
+        # nicht die ähnliche Nummer des Verzeichniseintrags.
+        save_contact(
+            original_number,
+            candidate_name,
+            source="search.ch Durchwahl-Suche",
+        )
+        self.current_unknown_number = None
+        self.refresh_lists()
+        if (
+            self.last_call_id is not None
+            and self.last_call_id == normalize_phone(original_number)
+        ):
+            self.call_log_name = candidate_name
+            self.set_call_display(
+                candidate_name,
+                original_number,
+                f"Manuell bestätigter Treffer: {candidate_number}",
+            )
+            self.toast.update_name(candidate_name)
+        self.toast.clear_candidates(animate=True)
+        logger.info("Treffer aus Toast übernommen: %s → %s", original_number, candidate_name)
+
     def _log_call_end(self):
         """Speichert den beendeten Anruf im Anrufprotokoll."""
         if self.call_started_at is None:
@@ -2169,11 +2500,25 @@ class CallerIDApp:
             self.last_call_id = None
             return
 
+        if call.get("ended"):
+            # Explizites Anrufende von Swisscom (z. B. "Anruf beendet"):
+            # sofort beenden, nicht auf Leer-Polls warten.
+            if self.last_call_id is not None or self.call_started_at is not None:
+                logger.info("TRACE: process_call(ended) – Anruf beendet, blende Toast aus")
+                self.toast.hide()
+                self._log_call_end()
+                self.set_call_display("Warte auf eingehenden Anruf ...")
+            self.last_call_id = None
+            self._none_count = 0
+            return
+
         name = call["name"]
         number = call["nummer"]
         status = call.get("status")
         normalized = normalize_phone(number)
-        call_id = (normalized, name)
+        # Identität nur über die Nummer: Namenswechsel während eines
+        # Anrufs (z. B. Gesprächszähler) starten keinen neuen Anruf.
+        call_id = normalized
         self._none_count = 0
 
         if call_id == self.last_call_id:
@@ -2325,7 +2670,7 @@ class CallerIDApp:
         # Ein älteres Suchergebnis darf keine neuere Anrufanzeige
         # überschreiben.
         if self.last_call_id is not None:
-            if self.last_call_id[0] != normalized:
+            if self.last_call_id != normalized:
                 pass
 
         status, data, message = result
@@ -2340,7 +2685,7 @@ class CallerIDApp:
 
             if (
                 self.last_call_id is not None
-                and self.last_call_id[0] == normalized
+                and self.last_call_id == normalized
             ):
                 self.call_log_name = data
                 self.set_call_display(
@@ -2355,11 +2700,10 @@ class CallerIDApp:
 
             if (
                 self.last_call_id is not None
-                and self.last_call_id[0] == normalized
+                and self.last_call_id == normalized
             ):
                 self.set_call_display(swisscom_name, number, message)
-
-            self.show_candidates(number, data)
+                self.toast.show_candidates(number, data)
 
         else:
             # Ausnahme Verteiler bei fehlgeschlagener Suche: Nicht als
@@ -2374,7 +2718,7 @@ class CallerIDApp:
 
             if (
                 self.last_call_id is not None
-                and self.last_call_id[0] == normalized
+                and self.last_call_id == normalized
             ):
                 if skip_unknown:
                     self.set_call_display(
@@ -2393,115 +2737,6 @@ class CallerIDApp:
 
         self.refresh_lists()
         self.refresh_api_quota()
-
-    # --------------------------------------------------------
-    # DURCHWAHL-TREFFER MANUELL ÜBERNEHMEN
-    # --------------------------------------------------------
-
-    def show_candidates(self, original_number, candidates):
-        dialog = tk.Toplevel(self.root)
-        dialog.title(f"Durchwahl-Treffer für {original_number}")
-        dialog.geometry("680x410")
-        dialog.transient(self.root)
-        set_window_icon(dialog)
-
-        ttk.Label(
-            dialog,
-            text=(
-                f"Kein exakter Treffer für {original_number}.\n"
-                "Bitte einen passenden Verzeichniseintrag auswählen."
-            ),
-            wraplength=640,
-        ).pack(padx=12, pady=12)
-
-        tree = ttk.Treeview(
-            dialog,
-            columns=("number", "name"),
-            show="headings",
-            selectmode="browse",
-        )
-
-        tree.heading("number", text="Gefundene Nummer")
-        tree.heading("name", text="Name")
-        tree.column("number", width=190)
-        tree.column("name", width=430)
-        tree.pack(fill="both", expand=True, padx=12, pady=5)
-
-        for index, (candidate_number, candidate_name) in enumerate(
-            candidates
-        ):
-            tree.insert(
-                "",
-                "end",
-                iid=str(index),
-                values=(candidate_number, candidate_name),
-            )
-
-        def accept_candidate():
-            selected = tree.selection()
-
-            if not selected:
-                messagebox.showinfo(
-                    "Auswahl fehlt",
-                    "Bitte zuerst einen Treffer auswählen.",
-                    parent=dialog,
-                )
-                return
-
-            candidate_number, candidate_name = tree.item(
-                selected[0], "values"
-            )
-
-            confirmed = messagebox.askyesno(
-                "Kontakt übernehmen",
-                (
-                    f"Den Namen '{candidate_name}' der tatsächlich "
-                    f"eingehenden Nummer {original_number} zuordnen?\n\n"
-                    f"Verzeichniseintrag: {candidate_number}"
-                ),
-                parent=dialog,
-            )
-
-            if not confirmed:
-                return
-
-            # Absichtlich die eingehende Nummer speichern,
-            # nicht die ähnliche Nummer des Verzeichniseintrags.
-            save_contact(
-                original_number,
-                candidate_name,
-                source="search.ch Durchwahl-Suche",
-            )
-
-            self.current_unknown_number = None
-            self.refresh_lists()
-
-            if (
-                self.last_call_id is not None
-                and self.last_call_id[0] == normalize_phone(original_number)
-            ):
-                self.set_call_display(
-                    candidate_name,
-                    original_number,
-                    f"Manuell bestätigter Treffer: {candidate_number}",
-                )
-
-            dialog.destroy()
-
-        buttons = ttk.Frame(dialog)
-        buttons.pack(fill="x", padx=12, pady=12)
-
-        ttk.Button(
-            buttons,
-            text="Ausgewählten Namen übernehmen",
-            command=accept_candidate,
-        ).pack(side="left")
-
-        ttk.Button(
-            buttons,
-            text="Schliessen",
-            command=dialog.destroy,
-        ).pack(side="right")
 
     # --------------------------------------------------------
     # TELEFONBUCH BEARBEITEN
@@ -2631,7 +2866,7 @@ class CallerIDApp:
         self.refresh_lists()
 
     def dial_selected_contact(self, _event=None):
-        """Doppelklick im Telefonbuch: Nummer per tel:-Link wählen lassen."""
+        """Doppelklick im Telefonbuch: Nummer direkt in Swisscom wählen."""
         selected = self.book_tree.selection()
 
         if not selected:
@@ -2642,20 +2877,69 @@ class CallerIDApp:
         if not contact:
             return "break"
 
-        uri = to_tel_uri(contact["display_number"] or selected[0])
+        number = to_dial_number(contact["display_number"] or selected[0])
 
-        if not uri:
+        if not number:
             return "break"
 
         try:
-            os.startfile(uri)
-            logger.info("Wahl gestartet: %s", uri)
-        except OSError as error:
+            window = Desktop(backend="uia").window(
+                title_re=f".*{APP_TITLE}.*"
+            )
+            if not window.exists(timeout=2):
+                raise RuntimeError("Swisscom-Fenster nicht gefunden.")
+
+            dial = None
+            call_button = None
+            for element in window.descendants():
+                try:
+                    automation_id = element.element_info.automation_id
+                    if automation_id == "DialNumberTextBox":
+                        dial = element
+                    elif automation_id == "CallButton":
+                        call_button = element
+                except Exception:
+                    continue
+
+            if dial is None:
+                raise RuntimeError(
+                    "Wählfeld (DialNumberTextBox) nicht gefunden."
+                )
+
+            dialed = False
+            try:
+                # ValuePattern: braucht keinen Fokus, geht auch minimiert.
+                dial.iface_value.SetValue(number)
+                dialed = True
+            except Exception:
+                pass
+
+            if not dialed:
+                try:
+                    dial.click_input()
+                    dial.type_keys(number, with_spaces=False)
+                    dialed = True
+                except Exception as error:
+                    raise RuntimeError(
+                        f"Nummer konnte nicht eingetragen werden: {error}"
+                    )
+
+            if call_button is None:
+                raise RuntimeError(
+                    "Anruf-Taste (CallButton) nicht gefunden."
+                )
+
+            try:
+                call_button.invoke()
+            except Exception:
+                call_button.click_input()
+
+            logger.info("Wahl gestartet: %s", number)
+        except Exception as error:
             logger.error("Wählen fehlgeschlagen: %s", error)
             messagebox.showwarning(
                 "Wählen nicht möglich",
-                "Kein Telefonie-Programm für tel:-Links registriert.\n"
-                f"Nummer: {contact['display_number']}",
+                f"Anruf konnte nicht gestartet werden:\n{error}",
             )
         return "break"
 
@@ -3296,6 +3580,7 @@ if __name__ == "__main__":
     migrate_legacy_db()
     init_db()
     migrate_add_kontakt()
+    migrate_international_format()
     cleanup_old_call_logs()
     first_run_csv_import()
     init_db()  # Erneut nach möglichem CSV-Import.
