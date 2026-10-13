@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.12"
+APP_VERSION = "3.2.13"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -2189,18 +2189,34 @@ class CallerIDApp:
             self.show_candidates(number, data)
 
         else:
-            add_unknown(number, message)
+            # Ausnahme Verteiler bei fehlgeschlagener Suche: Nicht als
+            # unbekannt speichern, damit der nächste Anruf es erneut
+            # versucht (API dann evtl. wieder verfügbar). Der
+            # Swisscom-Name wird einfach übernommen/angezeigt.
+            skip_unknown = (
+                status == "error" and _is_verteiler(swisscom_name)
+            )
+            if not skip_unknown:
+                add_unknown(number, message)
 
             if (
                 self.last_call_id is not None
                 and self.last_call_id[0] == normalized
             ):
-                self.set_call_display(
-                    swisscom_name,
-                    number,
-                    f"{message}\n"
-                    "Nummer in der Liste unbekannter Nummern gespeichert.",
-                )
+                if skip_unknown:
+                    self.set_call_display(
+                        swisscom_name,
+                        number,
+                        f"{message}\n"
+                        "Wird beim nächsten Anruf erneut geprüft.",
+                    )
+                else:
+                    self.set_call_display(
+                        swisscom_name,
+                        number,
+                        f"{message}\n"
+                        "Nummer in der Liste unbekannter Nummern gespeichert.",
+                    )
 
         self.refresh_lists()
 
