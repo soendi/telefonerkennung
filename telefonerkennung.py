@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.18"
+APP_VERSION = "3.2.19"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -774,6 +774,100 @@ class CallToast:
         content = tk.Frame(frame, bg="#1e1e1e")
         content.pack(side="left", fill="both", expand=True, padx=12, pady=10)
 
+        # Rechte Buttonspalte (Anrufsteuerung) – feste Breite, damit
+        # lange Listeneinträge die Buttons nicht quetschen können.
+        self.btn_frame = tk.Frame(frame, bg="#1e1e1e", width=52)
+        self.btn_frame.pack(side="right", fill="y", padx=(0, 4))
+        self.btn_frame.pack_propagate(False)
+        self.btn_mute = tk.Button(
+            self.btn_frame, text="S", width=4,
+            fg="white", bg="#2a2a2a", activebackground="#0052a5",
+            font=("Segoe UI", 9, "bold"), relief="flat",
+            state="disabled",
+        )
+        self.btn_mute.pack(fill="x", pady=(2, 2))
+        self.btn_conf = tk.Button(
+            self.btn_frame, text="+", width=4,
+            fg="white", bg="#2a2a2a", activebackground="#0052a5",
+            font=("Segoe UI", 9, "bold"), relief="flat",
+            command=self.toggle_dial_panel,
+        )
+        # Wird nur bei ausgehenden Anrufen eingeblendet (set_outgoing).
+        self.btn_transfer = tk.Button(
+            self.btn_frame, text="W", width=4,
+            fg="white", bg="#2a2a2a", activebackground="#0052a5",
+            font=("Segoe UI", 9, "bold"), relief="flat",
+            command=lambda: self.open_transfer_list("consult"),
+        )
+        self.btn_transfer.pack(fill="x", pady=(2, 2))
+        self.btn_direct = tk.Button(
+            self.btn_frame, text="DW", width=4,
+            fg="white", bg="#2a2a2a", activebackground="#0052a5",
+            font=("Segoe UI", 9, "bold"), relief="flat",
+            command=lambda: self.open_transfer_list("direct"),
+        )
+        self.btn_direct.pack(fill="x", pady=(2, 2))
+
+        # Zweiter Anruf (oben, nur bei Konferenz/Weiterleiten sichtbar).
+        self.second_frame = tk.Frame(content, bg="#1e1e1e")
+        # Wird nur gepackt, wenn ein zweiter Anruf aktiv ist.
+
+        self.second_name_label = tk.Label(
+            self.second_frame, text="",
+            fg="white", bg="#1e1e1e",
+            font=("Segoe UI", 12, "bold"), anchor="w",
+        )
+        self.second_name_label.pack(fill="x")
+
+        self.second_number_label = tk.Label(
+            self.second_frame, text="",
+            fg="#aaaaaa", bg="#1e1e1e",
+            font=("Segoe UI", 10), anchor="w",
+        )
+        self.second_number_label.pack(fill="x")
+
+        self.second_sep = tk.Frame(
+            self.second_frame, bg="#444444", height=1
+        )
+        self.second_sep.pack(fill="x", pady=(6, 6))
+
+        # Wähl-/Filterbereich für Konferenz (versteckt bis + gedrückt).
+        self.dial_frame = tk.Frame(content, bg="#1e1e1e")
+        # Wird nur gepackt, wenn die +-Erweiterung offen ist.
+
+        self.dial_title = tk.Label(
+            self.dial_frame, text="Teilnehmer für Konferenz:",
+            fg="#888888", bg="#1e1e1e",
+            font=("Segoe UI", 9), anchor="w",
+        )
+        self.dial_title.pack(fill="x")
+
+        self.dial_var = tk.StringVar()
+        self.dial_entry = tk.Entry(
+            self.dial_frame,
+            textvariable=self.dial_var,
+            fg="white", bg="#2a2a2a",
+            insertbackground="white",
+            font=("Segoe UI", 11),
+            relief="solid", bd=1,
+        )
+        self.dial_entry.pack(fill="x", pady=(2, 0))
+        self.dial_var.trace_add(
+            "write", lambda *a: self._rebuild_dial_rows()
+        )
+        self.dial_entry.bind("<Return>", self._pick_dial_first)
+
+        self.dial_rows_frame = tk.Frame(
+            self.dial_frame, bg="#1e1e1e"
+        )
+        self.dial_rows_frame.pack(fill="x", pady=(2, 0))
+        self.dial_labels = []
+
+        self.dial_sep = tk.Frame(
+            self.dial_frame, bg="#444444", height=1
+        )
+        self.dial_sep.pack(fill="x", pady=(6, 6))
+
         self.candidates_frame = tk.Frame(content, bg="#1e1e1e")
         # Wird nur gepackt, wenn Treffer zur Auswahl stehen.
 
@@ -862,6 +956,15 @@ class CallToast:
         self._candidates_number = None
         self._candidates_callback = None
         self._candidates_selected = None
+        self._outgoing = False
+        self._dial_open = False
+        self._dial_data = []
+        self._dial_selected = None
+        self._dial_callback = None
+        self._second_number = None
+        self._list_kind = None
+        self._transfer_mode = None
+        self._transfer_callback = None
 
         for widget in (frame, content, self.title_label,
                        self.kontakt_label, self.number_label):
@@ -988,8 +1091,10 @@ class CallToast:
 
     def show(self, name, number, status=None, kontakt=""):
         logger.info("TOAST SHOW aufgerufen: name=%s, number=%s, status=%r", name, number, status)
-        # Alten Anrufzustand (inkl. Trefferliste) zurücksetzen.
+        # Alten Anrufzustand (inkl. Trefferliste, Wahl, 2. Anruf) zurücksetzen.
         self.clear_candidates()
+        self.collapse_dial_panel()
+        self.clear_second()
         # Restlichen Editierzustand zurücksetzen.
         if self._editing:
             self._cancel_edit()
@@ -1100,12 +1205,19 @@ class CallToast:
         """callback(original_number, candidate_number, candidate_name)."""
         self._candidates_callback = callback
 
-    def show_candidates(self, original_number, candidates):
+    def show_candidates(self, original_number, candidates,
+                        title="Mehrere Treffer:", kind="lookup"):
         """Zeigt Trefferliste oben im Toast (Doppelklick wählt) –
         wächst animiert nach unten."""
         self._stop_anim()
+        self.collapse_dial_panel()
         self._candidates = list(candidates or [])
         self._candidates_number = original_number
+        self._list_kind = kind
+        try:
+            self.candidates_title.config(text=title)
+        except Exception:
+            pass
         try:
             start_h = self.window.winfo_height()
         except Exception:
@@ -1119,7 +1231,8 @@ class CallToast:
                 self._candidates
             ):
                 label = tk.Label(
-                    self.candidates_rows_frame, text=candidate_name,
+                    self.candidates_rows_frame,
+                    text=self._shorten(candidate_name),
                     fg="white", bg="#1e1e1e",
                     font=("Segoe UI", 11), anchor="w",
                 )
@@ -1152,6 +1265,11 @@ class CallToast:
         self._candidates = []
         self._candidates_number = None
         self._candidates_selected = None
+        self._list_kind = None
+        try:
+            self.candidates_title.config(text="Mehrere Treffer:")
+        except Exception:
+            pass
         try:
             for label in self.candidate_labels:
                 label.destroy()
@@ -1239,7 +1357,18 @@ class CallToast:
             candidate_number, candidate_name = self._candidates[index]
         except (IndexError, ValueError, TypeError):
             return "break"
-        if self._candidates_callback:
+        if self._list_kind == "transfer":
+            if self._transfer_callback:
+                try:
+                    self._transfer_callback(
+                        self._transfer_mode,
+                        self._candidates_number,
+                        candidate_number,
+                        candidate_name,
+                    )
+                except Exception:
+                    pass
+        elif self._candidates_callback:
             try:
                 self._candidates_callback(
                     self._candidates_number,
@@ -1250,9 +1379,299 @@ class CallToast:
                 pass
         return "break"
 
+    # ---------------------------------------------------------
+    # ANRUFSTEUERUNG (Buttons, Wahl-Panel, 2. Anruf)
+    # ---------------------------------------------------------
+
+    def set_outgoing(self, outgoing):
+        """+-Button nur bei ausgehenden Anrufen anzeigen."""
+        self._outgoing = outgoing
+        try:
+            if outgoing:
+                try:
+                    self.btn_conf.pack(
+                        fill="x", pady=(2, 2), before=self.btn_transfer
+                    )
+                except Exception:
+                    self.btn_conf.pack(fill="x", pady=(2, 2))
+            else:
+                self.btn_conf.pack_forget()
+        except Exception:
+            pass
+
+    def set_dial_callback(self, callback):
+        """callback(number, name) – zweiten Teilnehmer wählen."""
+        self._dial_callback = callback
+
+    def set_transfer_callback(self, callback):
+        """callback(mode, number, name) – Weiterleiten (nach UI-Analyse)."""
+        self._transfer_callback = callback
+
+    def show_second(self, name, number):
+        """Zweiten Anruf oben im Toast anzeigen."""
+        try:
+            self.second_name_label.config(text=name or "")
+            self.second_number_label.config(
+                text=format_phone_display(number or "")
+            )
+            try:
+                self.second_frame.pack(fill="x", before=self.title_label)
+            except Exception:
+                self.second_frame.pack(fill="x")
+            self._calc_target()
+            try:
+                self.window.geometry(f"+{self._target_x}+{self._target_y}")
+            except Exception:
+                pass
+            self.window.deiconify()
+            self.window.lift()
+            self._force_topmost()
+        except Exception:
+            pass
+
+    def clear_second(self):
+        try:
+            self.second_frame.pack_forget()
+        except Exception:
+            pass
+
+    def toggle_dial_panel(self):
+        """+-Button: Wahl-Panel auf/zu."""
+        try:
+            if self.dial_frame.winfo_ismapped():
+                self.collapse_dial_panel(animate=True)
+            else:
+                self.open_dial_panel()
+        except Exception:
+            pass
+
+    def open_dial_panel(self):
+        """Wahl-Panel mit Telefonbuch-Filter öffnen."""
+        self.clear_candidates()
+        try:
+            self.dial_var.set("")
+        except Exception:
+            pass
+        self._rebuild_dial_rows()
+        self._stop_anim()
+        try:
+            start_h = self.window.winfo_height()
+        except Exception:
+            start_h = 0
+        try:
+            self.dial_frame.pack(fill="x", before=self.title_label)
+        except Exception:
+            try:
+                self.dial_frame.pack(fill="x")
+            except Exception:
+                pass
+        self._calc_target()
+        self._animate_height(start_h or self._target_h, self._target_h)
+        self.window.deiconify()
+        self.window.lift()
+        self._force_topmost()
+        try:
+            self.dial_entry.focus_set()
+        except Exception:
+            pass
+
+    def collapse_dial_panel(self, animate=False):
+        try:
+            self.dial_frame.pack_forget()
+        except Exception:
+            pass
+        self._dial_data = []
+        self._dial_selected = None
+        if not animate:
+            return
+        self._shrink_to_content()
+
+    def _shrink_to_content(self):
+        """Fensterhöhe animiert auf Inhaltsgrösse schrumpfen."""
+        self.window.update_idletasks()
+        end_h = self.window.winfo_reqheight()
+        if not end_h or end_h < 50:
+            end_h = 140
+        if end_h > 600:
+            end_h = 600
+        self._target_h = end_h
+        try:
+            start_h = self.window.winfo_height()
+        except Exception:
+            return
+        self._animate_height(start_h, end_h)
+
+    @staticmethod
+    def _shorten(text, limit=34):
+        """Kürzt lange Listeneinträge mit … (nur Anzeige)."""
+        try:
+            text = str(text or "")
+        except Exception:
+            return ""
+        if len(text) > limit:
+            return text[: max(0, limit - 1)].rstrip() + "…"
+        return text
+
+    def _rebuild_dial_rows(self):
+        query = ""
+        try:
+            query = self.dial_var.get().strip()
+        except Exception:
+            pass
+        try:
+            for label in self.dial_labels:
+                label.destroy()
+            self.dial_labels = []
+            self._dial_data = []
+            self._dial_selected = None
+            try:
+                contacts = get_all_contacts()
+            except Exception:
+                contacts = []
+            qfold = query.casefold()
+            # Freie Nummer: Getipptes direkt wählbar, auch ungespeichert.
+            clean = query.replace(" ", "")
+            if (
+                clean
+                and any(ch.isdigit() for ch in clean)
+                and all(ch in "+0123456789()-/" for ch in clean)
+            ):
+                self._add_dial_row(f"Wählen: {query}", query, query)
+            shown = 0
+            for row in contacts:
+                if shown >= 8:
+                    break
+                number = row["display_number"] or ""
+                name = row["name"] or ""
+                kontakt = row["kontakt"] if "kontakt" in row.keys() else ""
+                haystack = " ".join([
+                    row["number"] or "", number, name, kontakt,
+                ]).casefold()
+                if qfold and qfold not in haystack:
+                    continue
+                # Nur Name anzeigen (wie im Telefonbuch gespeichert).
+                self._add_dial_row(name, number, name)
+                shown += 1
+        except Exception:
+            pass
+        # Höhe folgt der gefilterten Liste (smooth animiert).
+        try:
+            if self.dial_frame.winfo_ismapped():
+                self._fit_height_to_content()
+        except Exception:
+            pass
+
+    def _add_dial_row(self, text, number, name):
+        """Eine Dial-Zeile anlegen (Anzeige gekürzt, Daten vollständig)."""
+        try:
+            label = tk.Label(
+                self.dial_rows_frame,
+                text=self._shorten(text),
+                fg="white", bg="#1e1e1e",
+                font=("Segoe UI", 11), anchor="w",
+            )
+            label.pack(fill="x")
+            index = len(self._dial_data)
+            label.bind(
+                "<Button-1>",
+                lambda event, i=index: self._select_dial_row(i),
+            )
+            label.bind(
+                "<Double-Button-1>",
+                lambda event, i=index: self._pick_dial_index(i),
+            )
+            self.dial_labels.append(label)
+            self._dial_data.append((number, name))
+        except Exception:
+            pass
+
+    def _fit_height_to_content(self):
+        """Passt die Fensterhöhe smooth an den aktuellen Inhalt an."""
+        try:
+            self.window.update_idletasks()
+            end_h = self.window.winfo_reqheight()
+            if not end_h or end_h < 50:
+                return
+            if end_h > 600:
+                end_h = 600
+            self._target_h = end_h
+            try:
+                start_h = self.window.winfo_height()
+            except Exception:
+                return
+            if abs(end_h - start_h) < 3:
+                return
+            self._animate_height(start_h, end_h)
+        except Exception:
+            pass
+
+    def _select_dial_row(self, index):
+        try:
+            self._dial_selected = index
+            for i, label in enumerate(self.dial_labels):
+                label.config(
+                    bg="#0052a5" if i == index else "#1e1e1e"
+                )
+        except Exception:
+            pass
+
+    def _pick_dial_index(self, index):
+        try:
+            number, name = self._dial_data[index]
+        except (IndexError, ValueError, TypeError):
+            return "break"
+        if self._dial_callback:
+            try:
+                self._dial_callback(number, name)
+            except Exception:
+                pass
+        return "break"
+
+    def _pick_dial_first(self, _event=None):
+        if self._dial_selected is not None:
+            return self._pick_dial_index(self._dial_selected)
+        if self._dial_data:
+            return self._pick_dial_index(0)
+        return "break"
+
+    def open_transfer_list(self, mode):
+        """Weiterleiten-Liste: nur 3-stellige Kontakte (Durchwahlen)."""
+        # Zweiter Klick auf dieselbe Taste blendet die Liste wieder aus.
+        try:
+            showing = (
+                self._list_kind == "transfer"
+                and self._transfer_mode == mode
+                and bool(self._candidates)
+                and self.candidates_frame.winfo_ismapped()
+            )
+        except Exception:
+            showing = False
+        if showing:
+            self._transfer_mode = None
+            self.clear_candidates(animate=True)
+            return
+        self.collapse_dial_panel()
+        rows = []
+        try:
+            for row in get_all_contacts():
+                if len(normalize_phone(row["number"] or "")) == 3:
+                    rows.append((row["display_number"], row["name"]))
+        except Exception:
+            pass
+        self._transfer_mode = mode
+        title = (
+            "Weiterleiten an:" if mode == "consult"
+            else "Direkt weiterleiten an:"
+        )
+        self.show_candidates(
+            self._current_number, rows, title=title, kind="transfer"
+        )
+
     def hide(self):
         self._visible = False
         self.clear_candidates()
+        self.collapse_dial_panel()
+        self.clear_second()
         self._stop_ticker()
 
         # Editierten Namen/Kontakt speichern, bevor das Fenster schliesst.
@@ -1469,14 +1888,15 @@ def _swisscom_tree_lines(element, depth, lines):
     return False
 
 
-def dump_swisscom_ui_tree():
-    """Schreibt einmalig den Swisscom-Fensterbaum nach swisscom_ui_tree.log.
+def dump_swisscom_ui_tree(path=None, force=False):
+    """Schreibt den Swisscom-Fensterbaum in eine Logdatei.
 
-    Nur wenn die Swisscom-UI läuft und die Datei noch nicht existiert.
-    Gibt True zurück, wenn geschrieben wurde.
+    Ohne Pfad: einmalig nach swisscom_ui_tree.log (nur wenn die Datei
+    noch nicht existiert). Gibt True zurück, wenn geschrieben wurde.
     """
+    target = Path(path) if path else SWISSCOM_TREE_LOG
     try:
-        if SWISSCOM_TREE_LOG.exists():
+        if not force and target.exists():
             return False
         window = Desktop(backend="uia").window(
             title_re=f".*{APP_TITLE}.*"
@@ -1489,8 +1909,8 @@ def dump_swisscom_ui_tree():
         ]
         _swisscom_tree_lines(window, 0, lines)
         lines.append(f"# Elemente: {len(lines) - 2}")
-        SWISSCOM_TREE_LOG.write_text("\n".join(lines), encoding="utf-8")
-        logger.info("Swisscom UI-Baum gespeichert: %s", SWISSCOM_TREE_LOG)
+        target.write_text("\n".join(lines), encoding="utf-8")
+        logger.info("Swisscom UI-Baum gespeichert: %s", target)
         return True
     except Exception as error:
         logger.warning(
@@ -1618,6 +2038,7 @@ class CallerIDApp:
         self.last_call_id = None
         self.pending = set()
         self.current_unknown_number = None
+        self._tree_dumped_for_call = None
 
         # Anrufprotokoll: Startzeit und Anruferdaten des laufenden Anrufs.
         self.call_started_at = None
@@ -1645,6 +2066,8 @@ class CallerIDApp:
         )
         self.toast.set_edit_callback(self.on_toast_name_edit)
         self.toast.set_candidates_callback(self.on_toast_candidate_picked)
+        self.toast.set_dial_callback(self.on_toast_dial_second)
+        self.toast.set_transfer_callback(self.on_toast_transfer_picked)
 
         self.tray_icon = None
         self.setup_tray()
@@ -1833,6 +2256,7 @@ class CallerIDApp:
             self._log_call_end()
             self.set_call_display("Warte auf eingehenden Anruf ...")
             self.last_call_id = None
+            self._tree_dumped_for_call = None
             logger.info("TRACE: toast.hide() ausgeführt")
 
     def show_settings(self):
@@ -2212,6 +2636,18 @@ class CallerIDApp:
             font=("Segoe UI", 12, "bold"),
         ).pack(anchor="w", pady=(0, 8))
 
+        log_filter_frame = ttk.Frame(self.log_tab)
+        log_filter_frame.pack(fill="x", pady=(0, 6))
+        ttk.Label(log_filter_frame, text="Filter:").pack(side="left")
+        self.log_filter_var = tk.StringVar()
+        log_filter_entry = ttk.Entry(
+            log_filter_frame, textvariable=self.log_filter_var
+        )
+        log_filter_entry.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        self.log_filter_var.trace_add(
+            "write", lambda *a: self.refresh_call_log()
+        )
+
         log_frame = ttk.Frame(self.log_tab)
         log_frame.pack(fill="both", expand=True)
 
@@ -2444,6 +2880,36 @@ class CallerIDApp:
         self.toast.clear_candidates(animate=True)
         logger.info("Treffer aus Toast übernommen: %s → %s", original_number, candidate_name)
 
+    def on_toast_dial_second(self, number, name):
+        """Konferenz aus dem Toast: zweiten Teilnehmer wählen und oben anzeigen."""
+        if not number:
+            return
+        try:
+            self._swisscom_dial(to_dial_number(number))
+        except Exception as error:
+            logger.error("Konferenz-Wahl fehlgeschlagen: %s", error)
+            messagebox.showwarning(
+                "Wählen nicht möglich",
+                f"Zweiter Anruf konnte nicht gestartet werden:\n{error}",
+            )
+            return
+        self.toast.show_second(name or number, number)
+        self.toast.collapse_dial_panel(animate=True)
+        logger.info("Konferenz: zweiter Anruf gestartet: %s (%s)", name, number)
+
+    def on_toast_transfer_picked(self, mode, number, name):
+        """Weiterleiten aus dem Toast (W/DW) – Verdrahtung nach UI-Analyse."""
+        logger.info(
+            "Weiterleiten gewählt (Modus %s): %s (%s) – "
+            "Verdrahtung folgt nach Swisscom UI-Analyse.",
+            mode, name, number,
+        )
+        messagebox.showinfo(
+            "Weiterleiten",
+            f"Weiterleiten an {name} ({number}) wird nach der "
+            "Swisscom UI-Analyse aktiviert.",
+        )
+
     def _log_call_end(self):
         """Speichert den beendeten Anruf im Anrufprotokoll."""
         if self.call_started_at is None:
@@ -2470,6 +2936,34 @@ class CallerIDApp:
 
         self.call_started_at = None
         self.call_log_kontakt = ""
+
+    def _dump_active_call_tree(self):
+        """Sichert einmal pro Anruf den Swisscom UI-Baum.
+
+        Die Weiterleiten-Option ist fix im Fenster sichtbar, solange
+        ein Anruf aktiv ist – der Dump läuft deshalb automatisch bei
+        jedem erkannten Anruf (mit 2 s Vorlauf für den Panel-Aufbau).
+        """
+        try:
+            if self.test_mode:
+                return
+            if self._tree_dumped_for_call == self.last_call_id:
+                return
+            self._tree_dumped_for_call = self.last_call_id
+
+            def _delayed_dump():
+                try:
+                    time.sleep(2)
+                    dump_swisscom_ui_tree(
+                        path=LOG_DIR / "swisscom_ui_tree_active.log",
+                        force=True,
+                    )
+                except Exception:
+                    pass
+
+            threading.Thread(target=_delayed_dump, daemon=True).start()
+        except Exception:
+            pass
 
     def process_call(self, call):
         logger.info(f"TRACE: process_call aufgerufen: call={call}, test_mode={getattr(self, 'test_mode', 'N/A')}")
@@ -2498,6 +2992,7 @@ class CallerIDApp:
             logger.info("TRACE: toast.hide() ausgeführt")
 
             self.last_call_id = None
+            self._tree_dumped_for_call = None
             return
 
         if call.get("ended"):
@@ -2509,6 +3004,7 @@ class CallerIDApp:
                 self._log_call_end()
                 self.set_call_display("Warte auf eingehenden Anruf ...")
             self.last_call_id = None
+            self._tree_dumped_for_call = None
             self._none_count = 0
             return
 
@@ -2538,6 +3034,10 @@ class CallerIDApp:
         self.call_log_name = name or "Unbekannter Anrufer"
         self.call_log_kontakt = ""
         self.call_log_number = number
+        # UI-Baum des aktiven Anrufs sichern (Weiterleiten-Analyse).
+        self._dump_active_call_tree()
+        # +-Button nur bei ausgehenden Anrufen (Status Anrufen).
+        self.toast.set_outgoing(status == "Anrufen")
 
         # 1. Lokales Telefonbuch hat Vorrang.
         contact = get_contact(number)
@@ -2865,6 +3365,61 @@ class CallerIDApp:
         self.edit_kontakt_var.set("")
         self.refresh_lists()
 
+    def _swisscom_dial(self, number):
+        """Wählt eine Nummer direkt in Swisscom (Wählfeld + Anruf-Taste)."""
+        window = Desktop(backend="uia").window(
+            title_re=f".*{APP_TITLE}.*"
+        )
+        if not window.exists(timeout=2):
+            raise RuntimeError("Swisscom-Fenster nicht gefunden.")
+
+        dial = None
+        call_button = None
+        for element in window.descendants():
+            try:
+                automation_id = element.element_info.automation_id
+                if automation_id == "DialNumberTextBox":
+                    dial = element
+                elif automation_id == "CallButton":
+                    call_button = element
+            except Exception:
+                continue
+
+        if dial is None:
+            raise RuntimeError(
+                "Wählfeld (DialNumberTextBox) nicht gefunden."
+            )
+
+        dialed = False
+        try:
+            # ValuePattern: braucht keinen Fokus, geht auch minimiert.
+            dial.iface_value.SetValue(number)
+            dialed = True
+        except Exception:
+            pass
+
+        if not dialed:
+            try:
+                dial.click_input()
+                dial.type_keys(number, with_spaces=False)
+                dialed = True
+            except Exception as error:
+                raise RuntimeError(
+                    f"Nummer konnte nicht eingetragen werden: {error}"
+                )
+
+        if call_button is None:
+            raise RuntimeError(
+                "Anruf-Taste (CallButton) nicht gefunden."
+            )
+
+        try:
+            call_button.invoke()
+        except Exception:
+            call_button.click_input()
+
+        logger.info("Wahl gestartet: %s", number)
+
     def dial_selected_contact(self, _event=None):
         """Doppelklick im Telefonbuch: Nummer direkt in Swisscom wählen."""
         selected = self.book_tree.selection()
@@ -2883,58 +3438,7 @@ class CallerIDApp:
             return "break"
 
         try:
-            window = Desktop(backend="uia").window(
-                title_re=f".*{APP_TITLE}.*"
-            )
-            if not window.exists(timeout=2):
-                raise RuntimeError("Swisscom-Fenster nicht gefunden.")
-
-            dial = None
-            call_button = None
-            for element in window.descendants():
-                try:
-                    automation_id = element.element_info.automation_id
-                    if automation_id == "DialNumberTextBox":
-                        dial = element
-                    elif automation_id == "CallButton":
-                        call_button = element
-                except Exception:
-                    continue
-
-            if dial is None:
-                raise RuntimeError(
-                    "Wählfeld (DialNumberTextBox) nicht gefunden."
-                )
-
-            dialed = False
-            try:
-                # ValuePattern: braucht keinen Fokus, geht auch minimiert.
-                dial.iface_value.SetValue(number)
-                dialed = True
-            except Exception:
-                pass
-
-            if not dialed:
-                try:
-                    dial.click_input()
-                    dial.type_keys(number, with_spaces=False)
-                    dialed = True
-                except Exception as error:
-                    raise RuntimeError(
-                        f"Nummer konnte nicht eingetragen werden: {error}"
-                    )
-
-            if call_button is None:
-                raise RuntimeError(
-                    "Anruf-Taste (CallButton) nicht gefunden."
-                )
-
-            try:
-                call_button.invoke()
-            except Exception:
-                call_button.click_input()
-
-            logger.info("Wahl gestartet: %s", number)
+            self._swisscom_dial(number)
         except Exception as error:
             logger.error("Wählen fehlgeschlagen: %s", error)
             messagebox.showwarning(
@@ -2942,6 +3446,36 @@ class CallerIDApp:
                 f"Anruf konnte nicht gestartet werden:\n{error}",
             )
         return "break"
+
+    def on_toast_dial_second(self, number, name):
+        """Konferenz aus dem Toast: zweiten Teilnehmer wählen und oben anzeigen."""
+        if not number:
+            return
+        try:
+            self._swisscom_dial(to_dial_number(number))
+        except Exception as error:
+            logger.error("Konferenz-Wahl fehlgeschlagen: %s", error)
+            messagebox.showwarning(
+                "Wählen nicht möglich",
+                f"Zweiter Anruf konnte nicht gestartet werden:\n{error}",
+            )
+            return
+        self.toast.show_second(name or number, number)
+        self.toast.collapse_dial_panel(animate=True)
+        logger.info("Konferenz: zweiter Anruf gestartet: %s (%s)", name, number)
+
+    def on_toast_transfer_picked(self, mode, number, name):
+        """Weiterleiten aus dem Toast (W/DW) – Verdrahtung nach UI-Analyse."""
+        logger.info(
+            "Weiterleiten gewählt (Modus %s): %s (%s) – "
+            "Verdrahtung folgt nach Swisscom UI-Analyse.",
+            mode, name, number,
+        )
+        messagebox.showinfo(
+            "Weiterleiten",
+            f"Weiterleiten an {name} ({number}) wird nach der "
+            "Swisscom UI-Analyse aktiviert.",
+        )
 
     # --------------------------------------------------------
     # TELEFONBUCH EXPORT / IMPORT (CSV)
@@ -3228,6 +3762,12 @@ class CallerIDApp:
         rows = list(get_call_logs())
         rows.sort(key=self._log_sort_key, reverse=self._log_sort_desc)
 
+        log_filter = ""
+        try:
+            log_filter = self.log_filter_var.get().strip().casefold()
+        except Exception:
+            pass
+
         for row in rows:
             started = row["started_at"]
             # Datum: dd.mm.jjjj
@@ -3243,18 +3783,20 @@ class CallerIDApp:
             else:
                 duration_text = f"{minutes}:{seconds:02d}"
 
-            self.log_tree.insert(
-                "",
-                "end",
-                values=(
-                    date_part,      # dd.mm.jjjj
-                    time_part,      # hh:mm
-                    row["display_number"],
-                    row["name"],
-                    row["kontakt"] if "kontakt" in row.keys() else "",
-                    duration_text,
-                ),
+            values = (
+                date_part,      # dd.mm.jjjj
+                time_part,      # hh:mm
+                row["display_number"],
+                row["name"],
+                row["kontakt"] if "kontakt" in row.keys() else "",
+                duration_text,
             )
+            if log_filter and log_filter not in " ".join(
+                str(value or "") for value in values
+            ).casefold():
+                continue
+
+            self.log_tree.insert("", "end", values=values)
 
     def _log_sort_key(self, row):
         """Sortierschlüssel für die angegebene Spalte."""
