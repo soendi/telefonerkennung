@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.21"
+APP_VERSION = "3.2.22"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -1975,6 +1975,51 @@ def maybe_dump_swisscom_ui_tree():
     threading.Thread(target=dump_swisscom_ui_tree, daemon=True).start()
 
 
+def _probe_element_details(element):
+    """Diagnose-Eigenschaften eines UIA-Elements (Mute-Analyse).
+
+    Fängt alles ein, was den gedrückten Zustand verraten könnte:
+    Klassen, Namen, Toggle- und Legacy-Werte (inkl. Fehlermeldungen,
+    die verraten, warum ein Pattern fehlt).
+    """
+    details = {}
+    try:
+        info = element.element_info
+    except Exception:
+        return {"element": "<nicht lesbar>"}
+    for attr in ("automation_id", "control_type", "class_name",
+                 "framework_id", "name"):
+        try:
+            details[attr] = getattr(info, attr)
+        except Exception as error:
+            details[attr] = f"<Fehler: {error}>"
+    try:
+        details["toggle"] = int(element.iface_toggle.ToggleState)
+    except Exception as error:
+        details["toggle"] = f"<Fehler: {error}>"
+    try:
+        legacy = element.iface_legacy_iaccessible
+        details["legacy_state"] = hex(int(legacy.State))
+        for lattr in ("Name", "Description", "Help"):
+            try:
+                details[f"legacy_{lattr.lower()}"] = getattr(legacy, lattr)
+            except Exception:
+                pass
+    except Exception as error:
+        details["legacy"] = f"<Fehler: {error}>"
+    try:
+        details["is_enabled"] = element.is_enabled()
+    except Exception as error:
+        details["is_enabled"] = f"<Fehler: {error}>"
+    try:
+        parent = element.parent()
+        details["parent_id"] = parent.element_info.automation_id
+        details["parent_class"] = parent.element_info.class_name
+    except Exception:
+        pass
+    return details
+
+
 def _read_toggle_details(element):
     """(toggle_raw, legacy_raw, result) – Rohwerte für Diagnose im Log."""
     toggle_raw = None
@@ -3580,22 +3625,33 @@ class CallerIDApp:
             return
         try:
             window = self._swisscom_window()
-            toggle_raw = legacy_raw = state = None
+            mute_el = None
             for element in window.descendants():
                 try:
                     if element.element_info.automation_id == "Mute":
-                        toggle_raw, legacy_raw, state = _read_toggle_details(
-                            element
-                        )
+                        mute_el = element
                         break
                 except Exception:
                     continue
-            logger.info(
-                "Mute-Rohwerte: toggle=%s legacy=%s -> muted=%s",
-                toggle_raw,
-                hex(legacy_raw) if legacy_raw is not None else None,
-                state,
-            )
+            if mute_el is None:
+                logger.info("Mute-Details: Button nicht gefunden")
+                state = None
+            else:
+                details = _probe_element_details(mute_el)
+                state = _read_toggle_state(mute_el)
+                logger.info(
+                    "Mute-Details: toggle=%s legacy=%s class=%r name=%r "
+                    "enabled=%s parent=%s/%s -> muted=%s",
+                    details.get("toggle"),
+                    details.get(
+                        "legacy_state", details.get("legacy")),
+                    details.get("class_name"),
+                    details.get("name"),
+                    details.get("is_enabled"),
+                    details.get("parent_id"),
+                    details.get("parent_class"),
+                    state,
+                )
         except Exception:
             state = None
         if state is None:
