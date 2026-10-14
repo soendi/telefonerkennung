@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.19"
+APP_VERSION = "3.2.20"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -784,6 +784,7 @@ class CallToast:
             fg="white", bg="#2a2a2a", activebackground="#0052a5",
             font=("Segoe UI", 9, "bold"), relief="flat",
             state="disabled",
+            command=self._on_mute_click,
         )
         self.btn_mute.pack(fill="x", pady=(2, 2))
         self.btn_conf = tk.Button(
@@ -908,7 +909,7 @@ class CallToast:
             fg="white", bg="#2a2a2a",
             insertbackground="white",
             font=("Segoe UI", 14, "bold"),
-            relief="solid", bd=1,
+            relief="flat", bd=2,
         )
         # Entry initial versteckt (pack erst beim Bearbeiten).
 
@@ -924,7 +925,7 @@ class CallToast:
             fg="white", bg="#2a2a2a",
             insertbackground="white",
             font=("Segoe UI", 11),
-            relief="solid", bd=1,
+            relief="flat", bd=2,
         )
         # Entry initial versteckt (pack erst beim Bearbeiten).
 
@@ -961,6 +962,8 @@ class CallToast:
         self._dial_data = []
         self._dial_selected = None
         self._dial_callback = None
+        self._mute_callback = None
+        self._muted = False
         self._second_number = None
         self._list_kind = None
         self._transfer_mode = None
@@ -996,6 +999,46 @@ class CallToast:
     def set_click_callback(self, callback):
         self._click_callback = callback
 
+    def set_mute_callback(self, callback):
+        """callback() – Stummschaltung umschalten."""
+        self._mute_callback = callback
+
+    def _on_mute_click(self):
+        if self._mute_callback:
+            try:
+                self._mute_callback()
+            except Exception:
+                pass
+
+    def set_muted(self, value):
+        """Echten Mute-Zustand übernehmen (löst keinen Callback aus)."""
+        self._muted = bool(value)
+        self._refresh_mute_button()
+
+    def toggle_muted(self):
+        """Optimistischer Fallback, wenn der echte Zustand unlesbar ist."""
+        self._muted = not self._muted
+        self._refresh_mute_button()
+
+    def _refresh_mute_enabled(self):
+        """S nur bei verbundenem Anruf aktiv (Mute gibt es nur im Gespräch)."""
+        try:
+            self.btn_mute.config(
+                state="normal" if self._connected else "disabled"
+            )
+        except Exception:
+            pass
+
+    def _refresh_mute_button(self):
+        """Gedrückt-Darstellung, solange Stummschaltung aktiv ist."""
+        try:
+            if self._muted:
+                self.btn_mute.config(relief="sunken", bg="#0052a5")
+            else:
+                self.btn_mute.config(relief="flat", bg="#2a2a2a")
+        except Exception:
+            pass
+
     def set_edit_callback(self, callback):
         """callback(number, name) – wird beim Ausblenden mit
         geändertem Namen aufgerufen."""
@@ -1017,7 +1060,8 @@ class CallToast:
 
         self._editing = True
         self.name_label.pack_forget()
-        self.name_entry.pack(fill="x")
+        # before= hält das Feld an Ort und Stelle (kein Hüpfen).
+        self.name_entry.pack(fill="x", before=self.kontakt_label)
         self.name_entry.delete(0, "end")
         self.name_entry.insert(
             0, self.name_label.cget("text") or ""
@@ -1108,6 +1152,10 @@ class CallToast:
         self._visible = True
         self._connected = status is not None and status != "Ankommender Anruf"
         self._title_prefix = "Verbunden" if self._connected else "Eingehender Anruf"
+        self._refresh_mute_enabled()
+        # Neuer Anruf: Stummschaltung gilt als aus.
+        self._muted = False
+        self._refresh_mute_button()
 
         self.name_label.config(text=self._original_name)
         self.kontakt_label.config(text=self._original_kontakt)
@@ -1165,6 +1213,7 @@ class CallToast:
             self._connected = connected
             self._title_prefix = prefix
             self.title_label.config(text=f"{prefix} ({self._ring_seconds} s)")
+            self._refresh_mute_enabled()
             logger.info("TOAST Statuswechsel: %r", status)
         except Exception:
             pass
@@ -1669,6 +1718,8 @@ class CallToast:
 
     def hide(self):
         self._visible = False
+        self._muted = False
+        self._refresh_mute_button()
         self.clear_candidates()
         self.collapse_dial_panel()
         self.clear_second()
@@ -1924,6 +1975,21 @@ def maybe_dump_swisscom_ui_tree():
     threading.Thread(target=dump_swisscom_ui_tree, daemon=True).start()
 
 
+def _read_toggle_state(element):
+    """Toggle-Zustand eines Swisscom-Buttons: True/False/None (unlesbar)."""
+    try:
+        return bool(element.iface_toggle.ToggleState)
+    except Exception:
+        pass
+    try:
+        state = int(element.iface_legacy_iaccessible.State)
+        # STATE_SYSTEM_CHECKED (0x10) oder PRESSED (0x8).
+        return bool(state & 0x18)
+    except Exception:
+        pass
+    return None
+
+
 def get_incoming_call():
     """
     Liest den aktuellen eingehenden Anruf aus.
@@ -1939,6 +2005,7 @@ def get_incoming_call():
 
         status = None
         panel = None
+        muted = None
 
         for element in window.descendants():
             try:
@@ -1949,6 +2016,9 @@ def get_incoming_call():
 
                 elif automation_id == "MyPanel":
                     panel = element
+
+                elif automation_id == "Mute":
+                    muted = _read_toggle_state(element)
 
             except Exception:
                 continue
@@ -2011,7 +2081,8 @@ def get_incoming_call():
         if status not in ACTIVE_CALL_STATUSES:
             return None
 
-        return {"name": name, "nummer": number, "status": status}
+        return {"name": name, "nummer": number, "status": status,
+                "muted": muted}
 
     except Exception as error:
         logger.error("Fehler beim Lesen der Swisscom-App: %s", error)
@@ -2068,6 +2139,7 @@ class CallerIDApp:
         self.toast.set_candidates_callback(self.on_toast_candidate_picked)
         self.toast.set_dial_callback(self.on_toast_dial_second)
         self.toast.set_transfer_callback(self.on_toast_transfer_picked)
+        self.toast.set_mute_callback(self.on_toast_mute)
 
         self.tray_icon = None
         self.setup_tray()
@@ -2880,36 +2952,6 @@ class CallerIDApp:
         self.toast.clear_candidates(animate=True)
         logger.info("Treffer aus Toast übernommen: %s → %s", original_number, candidate_name)
 
-    def on_toast_dial_second(self, number, name):
-        """Konferenz aus dem Toast: zweiten Teilnehmer wählen und oben anzeigen."""
-        if not number:
-            return
-        try:
-            self._swisscom_dial(to_dial_number(number))
-        except Exception as error:
-            logger.error("Konferenz-Wahl fehlgeschlagen: %s", error)
-            messagebox.showwarning(
-                "Wählen nicht möglich",
-                f"Zweiter Anruf konnte nicht gestartet werden:\n{error}",
-            )
-            return
-        self.toast.show_second(name or number, number)
-        self.toast.collapse_dial_panel(animate=True)
-        logger.info("Konferenz: zweiter Anruf gestartet: %s (%s)", name, number)
-
-    def on_toast_transfer_picked(self, mode, number, name):
-        """Weiterleiten aus dem Toast (W/DW) – Verdrahtung nach UI-Analyse."""
-        logger.info(
-            "Weiterleiten gewählt (Modus %s): %s (%s) – "
-            "Verdrahtung folgt nach Swisscom UI-Analyse.",
-            mode, name, number,
-        )
-        messagebox.showinfo(
-            "Weiterleiten",
-            f"Weiterleiten an {name} ({number}) wird nach der "
-            "Swisscom UI-Analyse aktiviert.",
-        )
-
     def _log_call_end(self):
         """Speichert den beendeten Anruf im Anrufprotokoll."""
         if self.call_started_at is None:
@@ -2936,6 +2978,23 @@ class CallerIDApp:
 
         self.call_started_at = None
         self.call_log_kontakt = ""
+
+    def _dump_delayed(self, filename, delay=3):
+        """Schreibt verzögert einen Swisscom UI-Dump (Thread, blockiert nicht).
+
+        Für Aktions-Dumps (Weiterleiten, Gruppenanruf, Stummschaltung):
+        läuft automatisch, der Nutzer muss sich um nichts kümmern.
+        """
+        def _run():
+            try:
+                time.sleep(delay)
+                dump_swisscom_ui_tree(
+                    path=LOG_DIR / filename, force=True
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _dump_active_call_tree(self):
         """Sichert einmal pro Anruf den Swisscom UI-Baum.
@@ -3022,6 +3081,9 @@ class CallerIDApp:
             # Toast stehen lassen, nur Titel aktualisieren.
             if status:
                 self.toast.update_status(status)
+            # Echten Mute-Zustand übernehmen (auch bei Klick in Swisscom).
+            if call.get("muted") is not None:
+                self.toast.set_muted(call["muted"])
             return
 
         # Vorherigen Anruf zu Ende protokollieren, falls direkt
@@ -3365,6 +3427,36 @@ class CallerIDApp:
         self.edit_kontakt_var.set("")
         self.refresh_lists()
 
+    def _swisscom_window(self):
+        """Swisscom-Hauptfenster (UIA); wirft RuntimeError wenn nicht da."""
+        window = Desktop(backend="uia").window(
+            title_re=f".*{APP_TITLE}.*"
+        )
+        if not window.exists(timeout=2):
+            raise RuntimeError("Swisscom-Fenster nicht gefunden.")
+        return window
+
+    def _swisscom_click_button(self, automation_id, description):
+        """Klickt einen Swisscom-Button per AutomationId (invoke, sonst Klick)."""
+        window = self._swisscom_window()
+        button = None
+        for element in window.descendants():
+            try:
+                if element.element_info.automation_id == automation_id:
+                    button = element
+                    break
+            except Exception:
+                continue
+        if button is None:
+            raise RuntimeError(
+                f"{description} ({automation_id}) nicht gefunden."
+            )
+        try:
+            button.invoke()
+        except Exception:
+            button.click_input()
+        logger.info("%s betätigt.", description)
+
     def _swisscom_dial(self, number):
         """Wählt eine Nummer direkt in Swisscom (Wählfeld + Anruf-Taste)."""
         window = Desktop(backend="uia").window(
@@ -3462,19 +3554,113 @@ class CallerIDApp:
             return
         self.toast.show_second(name or number, number)
         self.toast.collapse_dial_panel(animate=True)
+        # Gruppenanruf-Zustand automatisch sichern.
+        self._dump_delayed("dump_gruppenanruf.log")
         logger.info("Konferenz: zweiter Anruf gestartet: %s (%s)", name, number)
 
+    def _swisscom_mute_state(self):
+        """Liest den echten Mute-Zustand vom Swisscom-Button (True/False/None)."""
+        window = self._swisscom_window()
+        for element in window.descendants():
+            try:
+                if element.element_info.automation_id == "Mute":
+                    return _read_toggle_state(element)
+            except Exception:
+                continue
+        return None
+
+    def on_toast_mute(self):
+        """Stummschaltung umschalten, echten Zustand zurücklesen."""
+        try:
+            self._swisscom_click_button("Mute", "Stummschaltung")
+        except Exception as error:
+            logger.error("Stummschalten fehlgeschlagen: %s", error)
+            messagebox.showwarning(
+                "Stummschalten nicht möglich",
+                f"Stummschaltung konnte nicht umgeschaltet werden:\n{error}",
+            )
+            return
+        try:
+            state = self._swisscom_mute_state()
+        except Exception:
+            state = None
+        if state is None:
+            self.toast.toggle_muted()
+        else:
+            self.toast.set_muted(state)
+        # Mute-Zustand automatisch sichern.
+        self._dump_delayed("dump_stummschaltung.log", delay=2)
+
     def on_toast_transfer_picked(self, mode, number, name):
-        """Weiterleiten aus dem Toast (W/DW) – Verdrahtung nach UI-Analyse."""
-        logger.info(
-            "Weiterleiten gewählt (Modus %s): %s (%s) – "
-            "Verdrahtung folgt nach Swisscom UI-Analyse.",
-            mode, name, number,
-        )
+        """Weiterleiten Phase 1: Transfer starten + Ziel eintragen.
+
+        Der Bestätigungs-Dialog danach ist noch unbekannt – es wird ein
+        Transfer-Dump geschrieben; die finale Verdrahtung folgt, sobald
+        der Dump vorliegt. Der Anruf bleibt bis dahin gehalten.
+        """
+        if not number:
+            return
+        try:
+            self._swisscom_click_button(
+                "BeginTransferButton", "Weiterleiten gestartet"
+            )
+        except Exception as error:
+            logger.error(
+                "Weiterleiten starten fehlgeschlagen: %s", error
+            )
+            messagebox.showwarning(
+                "Weiterleiten nicht möglich",
+                f"Weiterleiten konnte nicht gestartet werden:\n{error}",
+            )
+            return
+        try:
+            target = to_dial_number(number)
+            window = self._swisscom_window()
+            dial = None
+            for element in window.descendants():
+                try:
+                    if (
+                        element.element_info.automation_id
+                        == "DialNumberTextBox"
+                    ):
+                        dial = element
+                        break
+                except Exception:
+                    continue
+            if dial is None:
+                raise RuntimeError(
+                    "Wählfeld (DialNumberTextBox) nicht gefunden."
+                )
+            try:
+                dial.iface_value.SetValue(target)
+            except Exception:
+                dial.click_input()
+                dial.type_keys(target, with_spaces=False)
+            logger.info(
+                "Weiterleiten-Ziel eingetragen: %s (%s)", name, target
+            )
+        except Exception as error:
+            logger.error(
+                "Weiterleiten-Ziel fehlgeschlagen: %s", error
+            )
+            messagebox.showwarning(
+                "Weiterleiten nicht möglich",
+                f"Weiterleiten-Ziel konnte nicht eingetragen werden:\n{error}",
+            )
+            return
+        # Transfer-Zustand automatisch sichern (finale Verdrahtung).
+        self._dump_delayed("dump_weiterleitung.log")
+        modus = "Rückfrage" if mode == "consult" else "Direkt"
         messagebox.showinfo(
-            "Weiterleiten",
-            f"Weiterleiten an {name} ({number}) wird nach der "
-            "Swisscom UI-Analyse aktiviert.",
+            "Weiterleiten vorbereitet",
+            f"Weiterleiten ({modus}) an {name} ({number}) ist in Swisscom "
+            f"vorbereitet.\n\nBitte den Transfer in Swisscom manuell "
+            f"abschliessen oder abbrechen – und danach die Datei\n"
+            f"dump_weiterleitung.log aus dem Logs-Ordner hier schicken.\n"
+            f"Damit wird die Taste vollautomatisch verdrahtet.",
+        )
+        logger.info(
+            "Weiterleiten vorbereitet (%s): %s (%s)", mode, name, number
         )
 
     # --------------------------------------------------------
