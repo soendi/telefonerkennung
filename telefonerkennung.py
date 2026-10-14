@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.26"
+APP_VERSION = "3.2.27"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -3596,6 +3596,99 @@ class CallerIDApp:
             dial.click_input()
             dial.type_keys(number, with_spaces=False)
 
+    def _swisscom_panel_click_next_button(self, window, name):
+        """Klickt den kleinen Button rechts neben der benannten Taste
+        (z. B. Dropdown-Pfeil neben 'Zuerst anrufen')."""
+        panel = self._swisscom_panel(window)
+        buttons = []
+        for element in panel.descendants():
+            try:
+                if element.element_info.control_type != "Button":
+                    continue
+                rect = element.rectangle()
+                buttons.append((rect.left, element))
+            except Exception:
+                continue
+        buttons.sort(key=lambda item: item[0])
+        for index, (_, element) in enumerate(buttons):
+            try:
+                if (element.window_text() or "") != name:
+                    continue
+            except Exception:
+                continue
+            if index + 1 >= len(buttons):
+                raise RuntimeError(
+                    f"Kein Button rechts neben '{name}' gefunden."
+                )
+            nxt = buttons[index + 1][1]
+            try:
+                nxt.invoke()
+            except Exception:
+                nxt.click_input()
+            logger.info("Button rechts neben '%s' betätigt.", name)
+            return
+        raise RuntimeError(f"Panel-Taste '{name}' nicht gefunden.")
+
+    def _swisscom_click_menu_item(self, window, text, timeout=4):
+        """Klickt einen Menüeintrag (z. B. im Dropdown), Gross/Klein egal."""
+        wanted = (text or "").strip().casefold()
+        deadline = time.time() + timeout
+
+        def _find():
+            for element in window.descendants():
+                try:
+                    if element.element_info.control_type != "MenuItem":
+                        continue
+                    if (
+                        element.window_text() or ""
+                    ).strip().casefold() == wanted:
+                        return element
+                except Exception:
+                    continue
+            return None
+
+        found = None
+        while found is None and time.time() < deadline:
+            try:
+                found = _find()
+            except Exception:
+                pass
+            if found is None:
+                time.sleep(0.4)
+        if found is None:
+            # Kontextmenüs sind eigene Top-Level-Fenster.
+            try:
+                desktop = Desktop(backend="uia")
+                for top in desktop.windows():
+                    try:
+                        for element in top.descendants():
+                            try:
+                                if (
+                                    element.element_info.control_type
+                                    != "MenuItem"
+                                ):
+                                    continue
+                                if (
+                                    element.window_text() or ""
+                                ).strip().casefold() == wanted:
+                                    found = element
+                                    break
+                            except Exception:
+                                continue
+                    except Exception:
+                        continue
+                    if found is not None:
+                        break
+            except Exception:
+                pass
+        if found is None:
+            raise RuntimeError(f"Menüeintrag '{text}' nicht gefunden.")
+        try:
+            found.invoke()
+        except Exception:
+            found.click_input()
+        logger.info("Menüeintrag '%s' gewählt.", text)
+
     def _swisscom_panel_click_named(self, window, name):
         """Benannten Button in der Transfer/Konferenz-Zeile klicken."""
         panel = self._swisscom_panel(window)
@@ -3774,8 +3867,7 @@ class CallerIDApp:
 
         consult (W): startet sofort den Rückfrage-Anruf ("Zuerst anrufen");
         der Transfer-Abschluss nach dem Gespräch folgt per Dump-Analyse.
-        direct (DW): trägt nur ein; die Abschluss-Taste folgt ebenfalls
-        per Dump-Analyse.
+        direct (DW): Dropdown neben "Zuerst anrufen" -> "jetzt weiterleiten".
         """
         if not number:
             return
@@ -3841,16 +3933,30 @@ class CallerIDApp:
                 "Rückfrage gestartet: %s (%s)", name, number
             )
             return
-        # direct: Abschluss-Taste (Transfer-Icon) folgt per Dump-Analyse.
+        # direct: Dropdown neben "Zuerst anrufen" -> "jetzt weiterleiten".
+        try:
+            window = self._swisscom_window()
+            self._swisscom_panel_click_next_button(window, "Zuerst anrufen")
+            window = self._swisscom_window()
+            self._swisscom_click_menu_item(window, "jetzt weiterleiten")
+        except Exception as error:
+            logger.error(
+                "Direkt-Weiterleiten fehlgeschlagen: %s", error
+            )
+            messagebox.showwarning(
+                "Weiterleiten nicht möglich",
+                f"Direkt-Weiterleiten konnte nicht ausgeführt werden:\n{error}\n\n"
+                f"Bitte den Transfer in Swisscom manuell abschliessen oder "
+                f"abbrechen.",
+            )
+            return
         self._dump_delayed("dump_weiterleitung.log")
         messagebox.showinfo(
-            "Weiterleiten vorbereitet",
-            f"Weiterleiten (Direkt) an {name} ({number}) ist in Swisscom "
-            f"vorbereitet.\n\nBitte in Swisscom manuell abschliessen oder "
-            f"abbrechen.",
+            "Weitergeleitet",
+            f"Anruf direkt an {name} ({number}) weitergeleitet.",
         )
         logger.info(
-            "Weiterleiten vorbereitet (direct): %s (%s)", name, number
+            "Direkt weitergeleitet: %s (%s)", name, number
         )
 
     # --------------------------------------------------------
