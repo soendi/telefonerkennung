@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.22"
+APP_VERSION = "3.2.23"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -2012,6 +2012,23 @@ def _probe_element_details(element):
     except Exception as error:
         details["is_enabled"] = f"<Fehler: {error}>"
     try:
+        details["wrapper"] = (
+            type(element).__module__ + "." + type(element).__name__
+        )
+    except Exception:
+        pass
+    # Win32-Rohwerte (Stil + Check-State statt Toggle-Pattern).
+    for meth in ("get_check_state", "style", "texts"):
+        try:
+            fn = getattr(element, meth)
+            details["w_" + meth] = fn() if callable(fn) else fn
+        except Exception as error:
+            details["w_" + meth] = f"<Fehler: {error}>"
+    try:
+        details["has_toggle"] = bool(element.iface_toggle is not None)
+    except Exception as error:
+        details["has_toggle"] = f"<Fehler: {error}>"
+    try:
         parent = element.parent()
         details["parent_id"] = parent.element_info.automation_id
         details["parent_class"] = parent.element_info.class_name
@@ -2036,6 +2053,13 @@ def _read_toggle_details(element):
         return toggle_raw, legacy_raw, bool(toggle_raw)
     if legacy_raw is not None:
         return toggle_raw, legacy_raw, bool(legacy_raw & 0x18)
+    # Win32-Buttons mit Checkbox-Stil melden den Zustand per BM_GETCHECK.
+    try:
+        if int(element.style()) & 0xF in (0x2, 0x3, 0x4, 0x5, 0x6, 0x9):
+            return toggle_raw, legacy_raw, bool(
+                int(element.get_check_state()))
+    except Exception:
+        pass
     return toggle_raw, legacy_raw, None
 
 
@@ -3640,13 +3664,18 @@ class CallerIDApp:
                 details = _probe_element_details(mute_el)
                 state = _read_toggle_state(mute_el)
                 logger.info(
-                    "Mute-Details: toggle=%s legacy=%s class=%r name=%r "
-                    "enabled=%s parent=%s/%s -> muted=%s",
+                    "Mute-Details: toggle=%s legacy=%s wrapper=%s class=%r "
+                    "fw=%r style=%s check=%s hastoggle=%s enabled=%s "
+                    "parent=%s/%s -> muted=%s",
                     details.get("toggle"),
                     details.get(
                         "legacy_state", details.get("legacy")),
+                    details.get("wrapper"),
                     details.get("class_name"),
-                    details.get("name"),
+                    details.get("framework_id"),
+                    details.get("w_style"),
+                    details.get("w_get_check_state"),
+                    details.get("has_toggle"),
                     details.get("is_enabled"),
                     details.get("parent_id"),
                     details.get("parent_class"),
