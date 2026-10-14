@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.20"
+APP_VERSION = "3.2.21"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -1975,19 +1975,28 @@ def maybe_dump_swisscom_ui_tree():
     threading.Thread(target=dump_swisscom_ui_tree, daemon=True).start()
 
 
+def _read_toggle_details(element):
+    """(toggle_raw, legacy_raw, result) – Rohwerte für Diagnose im Log."""
+    toggle_raw = None
+    try:
+        toggle_raw = int(element.iface_toggle.ToggleState)
+    except Exception:
+        pass
+    legacy_raw = None
+    try:
+        legacy_raw = int(element.iface_legacy_iaccessible.State)
+    except Exception:
+        pass
+    if toggle_raw is not None:
+        return toggle_raw, legacy_raw, bool(toggle_raw)
+    if legacy_raw is not None:
+        return toggle_raw, legacy_raw, bool(legacy_raw & 0x18)
+    return toggle_raw, legacy_raw, None
+
+
 def _read_toggle_state(element):
     """Toggle-Zustand eines Swisscom-Buttons: True/False/None (unlesbar)."""
-    try:
-        return bool(element.iface_toggle.ToggleState)
-    except Exception:
-        pass
-    try:
-        state = int(element.iface_legacy_iaccessible.State)
-        # STATE_SYSTEM_CHECKED (0x10) oder PRESSED (0x8).
-        return bool(state & 0x18)
-    except Exception:
-        pass
-    return None
+    return _read_toggle_details(element)[2]
 
 
 def get_incoming_call():
@@ -3558,17 +3567,6 @@ class CallerIDApp:
         self._dump_delayed("dump_gruppenanruf.log")
         logger.info("Konferenz: zweiter Anruf gestartet: %s (%s)", name, number)
 
-    def _swisscom_mute_state(self):
-        """Liest den echten Mute-Zustand vom Swisscom-Button (True/False/None)."""
-        window = self._swisscom_window()
-        for element in window.descendants():
-            try:
-                if element.element_info.automation_id == "Mute":
-                    return _read_toggle_state(element)
-            except Exception:
-                continue
-        return None
-
     def on_toast_mute(self):
         """Stummschaltung umschalten, echten Zustand zurücklesen."""
         try:
@@ -3581,7 +3579,23 @@ class CallerIDApp:
             )
             return
         try:
-            state = self._swisscom_mute_state()
+            window = self._swisscom_window()
+            toggle_raw = legacy_raw = state = None
+            for element in window.descendants():
+                try:
+                    if element.element_info.automation_id == "Mute":
+                        toggle_raw, legacy_raw, state = _read_toggle_details(
+                            element
+                        )
+                        break
+                except Exception:
+                    continue
+            logger.info(
+                "Mute-Rohwerte: toggle=%s legacy=%s -> muted=%s",
+                toggle_raw,
+                hex(legacy_raw) if legacy_raw is not None else None,
+                state,
+            )
         except Exception:
             state = None
         if state is None:
