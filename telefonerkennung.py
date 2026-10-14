@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.24"
+APP_VERSION = "3.2.25"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -1994,7 +1994,11 @@ def _probe_element_details(element):
         except Exception as error:
             details[attr] = f"<Fehler: {error}>"
     try:
-        details["toggle"] = int(element.iface_toggle.ToggleState)
+        try:
+            details["toggle"] = int(element.toggle_state())
+        except AttributeError:
+            details["toggle"] = int(
+                element.iface_toggle.CurrentToggleState)
     except Exception as error:
         details["toggle"] = f"<Fehler: {error}>"
     try:
@@ -2041,7 +2045,10 @@ def _read_toggle_details(element):
     """(toggle_raw, legacy_raw, result) – Rohwerte für Diagnose im Log."""
     toggle_raw = None
     try:
-        toggle_raw = int(element.iface_toggle.ToggleState)
+        try:
+            toggle_raw = int(element.toggle_state())
+        except AttributeError:
+            toggle_raw = int(element.iface_toggle.CurrentToggleState)
     except Exception:
         pass
     legacy_raw = None
