@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.23"
+APP_VERSION = "3.2.24"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -2264,6 +2264,14 @@ class CallerIDApp:
                     self.on_tray_test_outgoing,
                 ),
                 pystray.MenuItem(
+                    "Jetzt Dump Weiterleitung",
+                    self.on_tray_dump_transfer,
+                ),
+                pystray.MenuItem(
+                    "Jetzt Dump Gruppenanruf",
+                    self.on_tray_dump_group,
+                ),
+                pystray.MenuItem(
                     "Auf Updates prüfen",
                     self.on_tray_update_check,
                 ),
@@ -2299,6 +2307,18 @@ class CallerIDApp:
 
     def on_tray_update_check(self):
         self.ui_queue.put(("tray", "update_check"))
+
+    def on_tray_dump_transfer(self):
+        """Manueller Dump des Weiterleiten-Dialogs (Systray-Menü)."""
+        dump_swisscom_ui_tree(
+            path=LOG_DIR / "dump_weiterleitung.log", force=True
+        )
+
+    def on_tray_dump_group(self):
+        """Manueller Dump des Gruppenanruf-Dialogs (Systray-Menü)."""
+        dump_swisscom_ui_tree(
+            path=LOG_DIR / "dump_gruppenanruf.log", force=True
+        )
 
     def start_update_check(self):
         """Prüft im Hintergrund auf Updates und installiert ggf."""
