@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.25"
+APP_VERSION = "3.2.26"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -744,6 +744,9 @@ ACTIVE_CALL_STATUSES = {
     "Connected",
     "Active",
     "In Call",
+    # Halteposition bei Weiterleiten/Gruppenanruf: Anruf läuft weiter,
+    # Nummer bleibt sichtbar – Toast darf nicht verschwinden.
+    "Anruf auf Halteposition",
 }
 # Hinweis: "Anruf beendet" gehört bewusst NICHT dazu – dann ist
 # kein Anruf mehr aktiv und der Toast wird ausgeblendet.
@@ -3562,6 +3565,55 @@ class CallerIDApp:
             button.click_input()
         logger.info("%s betätigt.", description)
 
+    def _swisscom_panel(self, window):
+        """MyPanel (aktiver Anruf-Bereich) in Swisscom."""
+        for element in window.descendants():
+            try:
+                if element.element_info.automation_id == "MyPanel":
+                    return element
+            except Exception:
+                continue
+        raise RuntimeError("Anruf-Panel (MyPanel) nicht gefunden.")
+
+    def _swisscom_panel_set_dial(self, window, number):
+        """Nummer ins Wählfeld der Transfer/Konferenz-Zeile eintragen."""
+        panel = self._swisscom_panel(window)
+        dial = None
+        for element in panel.descendants():
+            try:
+                if element.element_info.automation_id == "DialNumberTextBox":
+                    dial = element
+                    break
+            except Exception:
+                continue
+        if dial is None:
+            raise RuntimeError(
+                "Wählfeld in Transfer-Zeile nicht gefunden."
+            )
+        try:
+            dial.iface_value.SetValue(number)
+        except Exception:
+            dial.click_input()
+            dial.type_keys(number, with_spaces=False)
+
+    def _swisscom_panel_click_named(self, window, name):
+        """Benannten Button in der Transfer/Konferenz-Zeile klicken."""
+        panel = self._swisscom_panel(window)
+        for element in panel.descendants():
+            try:
+                if element.element_info.control_type != "Button":
+                    continue
+                if (element.window_text() or "") == name:
+                    try:
+                        element.invoke()
+                    except Exception:
+                        element.click_input()
+                    logger.info("Panel-Taste '%s' betätigt.", name)
+                    return
+            except Exception:
+                continue
+        raise RuntimeError(f"Panel-Taste '{name}' nicht gefunden.")
+
     def _swisscom_dial(self, number):
         """Wählt eine Nummer direkt in Swisscom (Wählfeld + Anruf-Taste)."""
         window = Desktop(backend="uia").window(
@@ -3718,11 +3770,12 @@ class CallerIDApp:
         self._dump_delayed("dump_stummschaltung.log", delay=2)
 
     def on_toast_transfer_picked(self, mode, number, name):
-        """Weiterleiten Phase 1: Transfer starten + Ziel eintragen.
+        """Weiterleiten: Transfer starten + Ziel in Transfer-Zeile eintragen.
 
-        Der Bestätigungs-Dialog danach ist noch unbekannt – es wird ein
-        Transfer-Dump geschrieben; die finale Verdrahtung folgt, sobald
-        der Dump vorliegt. Der Anruf bleibt bis dahin gehalten.
+        consult (W): startet sofort den Rückfrage-Anruf ("Zuerst anrufen");
+        der Transfer-Abschluss nach dem Gespräch folgt per Dump-Analyse.
+        direct (DW): trägt nur ein; die Abschluss-Taste folgt ebenfalls
+        per Dump-Analyse.
         """
         if not number:
             return
@@ -3741,27 +3794,15 @@ class CallerIDApp:
             return
         try:
             target = to_dial_number(number)
+            # Transfer-Zeile braucht einen Moment zum Aufbauen.
+            time.sleep(1)
             window = self._swisscom_window()
-            dial = None
-            for element in window.descendants():
-                try:
-                    if (
-                        element.element_info.automation_id
-                        == "DialNumberTextBox"
-                    ):
-                        dial = element
-                        break
-                except Exception:
-                    continue
-            if dial is None:
-                raise RuntimeError(
-                    "Wählfeld (DialNumberTextBox) nicht gefunden."
-                )
             try:
-                dial.iface_value.SetValue(target)
+                self._swisscom_panel_set_dial(window, target)
             except Exception:
-                dial.click_input()
-                dial.type_keys(target, with_spaces=False)
+                time.sleep(2)
+                window = self._swisscom_window()
+                self._swisscom_panel_set_dial(window, target)
             logger.info(
                 "Weiterleiten-Ziel eingetragen: %s (%s)", name, target
             )
@@ -3774,19 +3815,42 @@ class CallerIDApp:
                 f"Weiterleiten-Ziel konnte nicht eingetragen werden:\n{error}",
             )
             return
-        # Transfer-Zustand automatisch sichern (finale Verdrahtung).
+        if mode == "consult":
+            try:
+                window = self._swisscom_window()
+                self._swisscom_panel_click_named(window, "Zuerst anrufen")
+            except Exception as error:
+                logger.error(
+                    "Rückfrage starten fehlgeschlagen: %s", error
+                )
+                messagebox.showwarning(
+                    "Weiterleiten nicht möglich",
+                    f"Rückfrage-Anruf konnte nicht gestartet werden:\n{error}\n\n"
+                    f"Bitte den Transfer in Swisscom manuell abbrechen.",
+                )
+                return
+            # Transfer-Zustand automatisch sichern (Abschluss-Verdrahtung).
+            self._dump_delayed("dump_weiterleitung.log")
+            messagebox.showinfo(
+                "Rückfrage läuft",
+                f"Rückfrage-Anruf an {name} ({number}) gestartet.\n\n"
+                f"Nach dem Gespräch den Transfer in Swisscom abschliessen – "
+                f"und danach per Systray 'Jetzt Dump Weiterleitung' sichern.",
+            )
+            logger.info(
+                "Rückfrage gestartet: %s (%s)", name, number
+            )
+            return
+        # direct: Abschluss-Taste (Transfer-Icon) folgt per Dump-Analyse.
         self._dump_delayed("dump_weiterleitung.log")
-        modus = "Rückfrage" if mode == "consult" else "Direkt"
         messagebox.showinfo(
             "Weiterleiten vorbereitet",
-            f"Weiterleiten ({modus}) an {name} ({number}) ist in Swisscom "
-            f"vorbereitet.\n\nBitte den Transfer in Swisscom manuell "
-            f"abschliessen oder abbrechen – und danach die Datei\n"
-            f"dump_weiterleitung.log aus dem Logs-Ordner hier schicken.\n"
-            f"Damit wird die Taste vollautomatisch verdrahtet.",
+            f"Weiterleiten (Direkt) an {name} ({number}) ist in Swisscom "
+            f"vorbereitet.\n\nBitte in Swisscom manuell abschliessen oder "
+            f"abbrechen.",
         )
         logger.info(
-            "Weiterleiten vorbereitet (%s): %s (%s)", mode, name, number
+            "Weiterleiten vorbereitet (direct): %s (%s)", name, number
         )
 
     # --------------------------------------------------------
