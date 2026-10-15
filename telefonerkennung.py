@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.27"
+APP_VERSION = "3.2.28"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -939,7 +939,6 @@ class CallToast:
         )
         self.number_label.pack(fill="x")
 
-        self._click_callback = None
         self._edit_callback = None
         self._ring_seconds = 0
         self._ticker_after_id = None
@@ -972,10 +971,6 @@ class CallToast:
         self._transfer_mode = None
         self._transfer_callback = None
 
-        for widget in (frame, content, self.title_label,
-                       self.kontakt_label, self.number_label):
-            widget.bind("<Button-1>", self._on_click)
-
         # Doppelklick auf den Namen: inline bearbeiten.
         self.name_label.bind("<Double-Button-1>", self._start_edit)
         self.name_entry.bind("<Return>", self._commit_edit)
@@ -998,9 +993,6 @@ class CallToast:
             self.window.lift()
         except Exception:
             pass
-
-    def set_click_callback(self, callback):
-        self._click_callback = callback
 
     def set_mute_callback(self, callback):
         """callback() – Stummschaltung umschalten."""
@@ -1047,24 +1039,37 @@ class CallToast:
         geändertem Namen aufgerufen."""
         self._edit_callback = callback
 
-    def _on_click(self, _event=None):
-        if self._editing or self._editing_kontakt:
-            return
-        if self._click_callback:
-            self._click_callback()
-
     # ---------------------------------------------------------
     # NAME INLINE BEARBEITEN (DOPPELKLICK)
     # ---------------------------------------------------------
+
+    def _pack_before(self, widget, sibling):
+        """Packt widget vor sibling; Fallback ans Ende.
+
+        Ein Feld darf nie verloren gehen: Schlägt before= fehl (Referenz
+        gerade versteckt), wird normal gepackt – sichtbar, notfalls unten.
+        """
+        try:
+            widget.pack(fill="x", before=sibling)
+        except Exception:
+            try:
+                widget.pack(fill="x")
+            except Exception:
+                pass
 
     def _start_edit(self, _event=None):
         if self._editing:
             return "break"
 
+        # Andere Bearbeitung zuerst abschliessen, sonst kollidiert pack
+        # (Referenz-Label versteckt -> Feld ginge verloren).
+        if self._editing_kontakt:
+            self._commit_kontakt_edit()
+
         self._editing = True
         self.name_label.pack_forget()
         # before= hält das Feld an Ort und Stelle (kein Hüpfen).
-        self.name_entry.pack(fill="x", before=self.kontakt_label)
+        self._pack_before(self.name_entry, self.kontakt_label)
         self.name_entry.delete(0, "end")
         self.name_entry.insert(
             0, self.name_label.cget("text") or ""
@@ -1081,7 +1086,7 @@ class CallToast:
         new_name = self.name_entry.get().strip()
 
         self.name_entry.pack_forget()
-        self.name_label.pack(fill="x", before=self.kontakt_label)
+        self._pack_before(self.name_label, self.kontakt_label)
 
         if new_name and new_name != self._original_name:
             self._edited_name = new_name
@@ -1092,7 +1097,7 @@ class CallToast:
     def _cancel_edit(self, _event=None):
         self._editing = False
         self.name_entry.pack_forget()
-        self.name_label.pack(fill="x", before=self.kontakt_label)
+        self._pack_before(self.name_label, self.kontakt_label)
         return "break"
 
     # ---------------------------------------------------------
@@ -1103,9 +1108,13 @@ class CallToast:
         if self._editing_kontakt:
             return "break"
 
+        # Andere Bearbeitung zuerst abschliessen (siehe _start_edit).
+        if self._editing:
+            self._commit_edit()
+
         self._editing_kontakt = True
         self.kontakt_label.pack_forget()
-        self.kontakt_entry.pack(fill="x", before=self.number_label)
+        self._pack_before(self.kontakt_entry, self.number_label)
         self.kontakt_entry.delete(0, "end")
         self.kontakt_entry.insert(
             0, self.kontakt_label.cget("text") or ""
@@ -1122,7 +1131,7 @@ class CallToast:
         new_kontakt = self.kontakt_entry.get().strip()
 
         self.kontakt_entry.pack_forget()
-        self.kontakt_label.pack(fill="x", before=self.number_label)
+        self._pack_before(self.kontakt_label, self.number_label)
 
         if new_kontakt != self._original_kontakt:
             self._edited_kontakt = new_kontakt
@@ -1133,7 +1142,7 @@ class CallToast:
     def _cancel_kontakt_edit(self, _event=None):
         self._editing_kontakt = False
         self.kontakt_entry.pack_forget()
-        self.kontakt_label.pack(fill="x", before=self.number_label)
+        self._pack_before(self.kontakt_label, self.number_label)
         return "break"
 
     def show(self, name, number, status=None, kontakt=""):
@@ -2219,10 +2228,8 @@ class CallerIDApp:
         self.durchwahl_suche = tk.BooleanVar(value=False)
 
         # Toast und Systray einrichten.
+        # Hinweis: Klicks auf den Toast öffnen nichts mehr (Benutzerwunsch).
         self.toast = CallToast(root)
-        self.toast.set_click_callback(
-            lambda: self.ui_queue.put(("tray", "open"))
-        )
         self.toast.set_edit_callback(self.on_toast_name_edit)
         self.toast.set_candidates_callback(self.on_toast_candidate_picked)
         self.toast.set_dial_callback(self.on_toast_dial_second)
