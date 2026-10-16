@@ -32,7 +32,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.29"
+APP_VERSION = "3.2.30"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -3023,6 +3023,10 @@ class CallerIDApp:
             self._log_sort_column = "date"
             self._log_sort_desc = True
             self.refresh_call_log()
+            return
+        # Unbekannt-Tab immer frisch lesen (externe Änderungen sichtbar).
+        if self.tabs.select() == str(self.unknown_tab):
+            self.refresh_lists()
 
     def poll_worker(self):
         """Liest die Swisscom-Oberfläche ausserhalb des GUI-Threads."""
@@ -4391,7 +4395,10 @@ class CallerIDApp:
 
         for phone, name in rows:
             try:
-                tree.insert("", "end", values=(name, phone))
+                tree.insert(
+                    "", "end",
+                    values=(name, format_international(phone)),
+                )
             except Exception:
                 continue
 
