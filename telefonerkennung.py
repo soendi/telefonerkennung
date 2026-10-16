@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import ttk, messagebox, filedialog
 import csv
+import json
 import logging
 from logging.handlers import RotatingFileHandler
 
@@ -31,7 +32,7 @@ from PIL import Image, ImageDraw
 # KONFIGURATION
 # ============================================================
 
-APP_VERSION = "3.2.28"
+APP_VERSION = "3.2.29"
 
 # True, sobald ein Update installiert wird: on_close beendet die App
 # dann wirklich, statt sie in den Tray zu schicken.
@@ -268,7 +269,8 @@ def init_db():
                 kontakt TEXT NOT NULL DEFAULT '',
                 first_seen TEXT NOT NULL,
                 last_seen TEXT NOT NULL,
-                reason TEXT NOT NULL
+                reason TEXT NOT NULL,
+                candidates TEXT NOT NULL DEFAULT '[]'
             )
         """)
 
@@ -353,6 +355,27 @@ def migrate_add_kontakt():
             )
 
 
+def migrate_unknown_candidates():
+    """Fügt unknown_numbers die Treffer-Spalte hinzu (Update-Pfad)."""
+    try:
+        with connect_db() as db:
+            cols = [row["name"] for row in db.execute(
+                "PRAGMA table_info(unknown_numbers)"
+            ).fetchall()]
+            if "candidates" not in cols:
+                db.execute(
+                    "ALTER TABLE unknown_numbers "
+                    "ADD COLUMN candidates TEXT NOT NULL DEFAULT '[]'"
+                )
+                logger.info(
+                    "DB-Migration: Spalte candidates in unknown_numbers ergänzt."
+                )
+    except Exception as error:
+        logger.error(
+            "DB-Migration für unknown_numbers fehlgeschlagen: %s", error
+        )
+
+
 def migrate_international_format():
     """Stellt Anzeige-Nummern auf internationales Format um (+41 XX XXX XX XX)."""
     try:
@@ -435,7 +458,12 @@ def save_contact(number, name, kontakt=None, source="Manuell"):
         )
 
 
-def add_unknown(number, reason):
+def add_unknown(number, reason, candidates=None):
+    """Unbekannte Nummer speichern; candidates=None lässt Treffer stehen.
+
+    candidates als Liste [(phone, name)] persistiert die Treffer,
+    [] verwirft sie (definitiv nichts gefunden).
+    """
     normalized = normalize_phone(number)
 
     if not normalized:
@@ -444,15 +472,58 @@ def add_unknown(number, reason):
     timestamp = now()
 
     with connect_db() as db:
-        db.execute("""
-            INSERT INTO unknown_numbers
-                (number, display_number, first_seen, last_seen, reason)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(number) DO UPDATE SET
-                display_number = excluded.display_number,
-                last_seen = excluded.last_seen,
-                reason = excluded.reason
-        """, (normalized, format_international(number), timestamp, timestamp, reason))
+        if candidates is None:
+            db.execute("""
+                INSERT INTO unknown_numbers
+                    (number, display_number, first_seen, last_seen, reason)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(number) DO UPDATE SET
+                    display_number = excluded.display_number,
+                    last_seen = excluded.last_seen,
+                    reason = excluded.reason
+            """, (normalized, format_international(number), timestamp, timestamp, reason))
+        else:
+            payload = json.dumps(
+                [[phone, name] for phone, name in (candidates or [])]
+            )
+            db.execute("""
+                INSERT INTO unknown_numbers
+                    (number, display_number, first_seen, last_seen, reason,
+                     candidates)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(number) DO UPDATE SET
+                    display_number = excluded.display_number,
+                    last_seen = excluded.last_seen,
+                    reason = excluded.reason,
+                    candidates = excluded.candidates
+            """, (normalized, format_international(number), timestamp, timestamp, reason, payload))
+
+
+def get_unknown_candidates(entry):
+    """Gemerkte Treffer eines Unbekannt-Eintrags als [(phone, name)]."""
+    try:
+        raw = (
+            entry["candidates"]
+            if entry is not None and "candidates" in entry.keys()
+            else ""
+        )
+    except Exception:
+        return []
+    if not raw:
+        return []
+    try:
+        items = json.loads(raw)
+    except Exception:
+        return []
+    result = []
+    for item in items or []:
+        try:
+            phone, name = item
+            if name:
+                result.append((phone, name))
+        except Exception:
+            continue
+    return result
 
 
 def delete_unknown(number):
@@ -2206,6 +2277,11 @@ class CallerIDApp:
         self.last_call_id = None
         self.pending = set()
         self.current_unknown_number = None
+        # Erneute Abfrage aus dem Unbekannt-Tab (Auswahl-Dialog statt Toast).
+        self.unknown_retry_number = None
+        self._candidates_dialog = None
+        # Gemerkte Treffer je Nummer (Doppelklick ohne Neuabfrage).
+        self.unknown_candidates = {}
         self._tree_dumped_for_call = None
 
         # Anrufprotokoll: Startzeit und Anruferdaten des laufenden Anrufs.
@@ -2741,6 +2817,10 @@ class CallerIDApp:
         self.unknown_tree.bind(
             "<<TreeviewSelect>>",
             self.on_unknown_selected,
+        )
+        self.unknown_tree.bind(
+            "<Double-Button-1>",
+            self.on_unknown_double_click,
         )
 
         edit_frame = ttk.LabelFrame(
@@ -3344,6 +3424,15 @@ class CallerIDApp:
     ):
         self.pending.discard(normalized)
 
+        # Erneute Abfrage aus dem Unbekannt-Tab: Flag verbrauchen, damit es
+        # nicht für spätere Suchen anderer Nummern hängen bleibt.
+        retry_unknown = (
+            self.unknown_retry_number is not None
+            and normalized == self.unknown_retry_number
+        )
+        if retry_unknown:
+            self.unknown_retry_number = None
+
         # Ein älteres Suchergebnis darf keine neuere Anrufanzeige
         # überschreiben.
         if self.last_call_id is not None:
@@ -3351,6 +3440,11 @@ class CallerIDApp:
                 pass
 
         status, data, message = result
+
+        if status != "candidates":
+            # Definitiv nichts -> vergessen; bei Fehler letzte Treffer behalten.
+            if status == "none":
+                self.unknown_candidates.pop(normalized, None)
 
         if status == "found":
             save_contact(number, data, source="search.ch")
@@ -3373,7 +3467,9 @@ class CallerIDApp:
                 self.toast.update_name(data)
 
         elif status == "candidates":
-            add_unknown(number, message)
+            add_unknown(number, message, data)
+            # Treffer im Hintergrund merken (Doppelklick ohne Neuabfrage).
+            self.unknown_candidates[normalized] = list(data or [])
 
             if (
                 self.last_call_id is not None
@@ -3381,6 +3477,9 @@ class CallerIDApp:
             ):
                 self.set_call_display(swisscom_name, number, message)
                 self.toast.show_candidates(number, data)
+            elif retry_unknown and data:
+                # Erneute Abfrage aus dem Tab: Auswahl-Dialog statt Toast.
+                self.show_unknown_candidates_dialog(number, data)
 
         else:
             # Ausnahme Verteiler bei fehlgeschlagener Suche: Nicht als
@@ -3391,7 +3490,10 @@ class CallerIDApp:
                 status == "error" and _is_verteiler(swisscom_name)
             )
             if not skip_unknown:
-                add_unknown(number, message)
+                add_unknown(
+                    number, message,
+                    [] if status == "none" else None,
+                )
 
             if (
                 self.last_call_id is not None
@@ -4101,6 +4203,39 @@ class CallerIDApp:
             entry["kontakt"] if "kontakt" in entry.keys() else ""
         )
 
+    def on_unknown_double_click(self, _event=None):
+        """Doppelklick: gemerkte Treffer sofort zeigen, sonst neu abfragen."""
+        selected = self.unknown_tree.selection()
+
+        if not selected:
+            return "break"
+
+        normalized = selected[0]
+        cached = self.unknown_candidates.get(normalized)
+
+        if not cached:
+            # Persistent gemerkte Treffer (überlebt Neustarts).
+            try:
+                cached = get_unknown_candidates(
+                    get_unknown_entry(normalized))
+            except Exception:
+                cached = []
+
+        if cached:
+            entry = get_unknown_entry(normalized)
+            display = (
+                entry["display_number"]
+                if entry
+                else self.unknown_number_var.get().strip() or normalized
+            )
+            self.show_unknown_candidates_dialog(display, cached)
+            return "break"
+
+        # Nichts gemerkt (z. B. nach Neustart): frisch abfragen, Ergebnis
+        # kommt über das Retry-Flag als Dialog zurück.
+        self.retry_selected_lookup()
+        return "break"
+
     def save_unknown_as_contact(self):
         number = self.unknown_number_var.get().strip()
         name = self.unknown_name_var.get().strip()
@@ -4123,6 +4258,13 @@ class CallerIDApp:
         try:
             save_contact(number, name, kontakt=kontakt, source="Manuell")
             self.current_unknown_number = None
+            # Übernommener Eintrag: aus Unbekannt-Liste + Cache entfernen,
+            # Formular leeren.
+            delete_unknown(number)
+            self.unknown_candidates.pop(normalize_phone(number), None)
+            self.unknown_number_var.set("")
+            self.unknown_name_var.set("")
+            self.unknown_kontakt_var.set("")
             self.refresh_lists()
 
             self.set_call_display(
@@ -4153,6 +4295,7 @@ class CallerIDApp:
         delete_unknown(number)
 
         self.current_unknown_number = None
+        self.unknown_candidates.pop(normalize_phone(number), None)
         self.unknown_number_var.set("")
         self.unknown_name_var.set("")
         self.unknown_kontakt_var.set("")
@@ -4170,7 +4313,139 @@ class CallerIDApp:
 
         delete_unknown(number)
         self.refresh_lists()
+        self.unknown_retry_number = normalize_phone(number)
         self.start_lookup(number, "Unbekannter Anrufer")
+
+    def show_unknown_candidates_dialog(self, number, candidates):
+        """Auswahlfenster bei Mehrfachtreffern (Tab Unbekannte Nummern).
+
+        Doppelklick/Übernehmen trägt den Namen ins Namensfeld ein und
+        schliesst das Fenster – gespeichert wird erst per
+        'Name speichern → Telefonbuch' (Kontakt ggf. nachtragen).
+        """
+        try:
+            old = self._candidates_dialog
+            if old is not None and old.winfo_exists():
+                old.destroy()
+        except Exception:
+            pass
+        self._candidates_dialog = None
+
+        rows = list(candidates or [])
+        if not rows:
+            return
+
+        # Bei verstecktem Hauptfenster kein modaler Dialog (sähe man nicht,
+        # Grab würde die App scheinbar einfrieren).
+        try:
+            root_visible = bool(self.root.winfo_viewable())
+        except Exception:
+            root_visible = True
+        if not root_visible:
+            logger.info(
+                "Treffer-Dialog übersprungen (Fenster versteckt): %s",
+                number,
+            )
+            return
+
+        dialog = tk.Toplevel(self.root)
+        self._candidates_dialog = dialog
+        try:
+            dialog.title(f"Treffer für {number}")
+            dialog.transient(self.root)
+            dialog.minsize(420, 200)
+        except Exception:
+            pass
+        set_window_icon(dialog)
+
+        ttk.Label(
+            dialog,
+            text=f"Mehrere Treffer für {number} – bitte wählen:",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(anchor="w", padx=10, pady=(10, 4))
+
+        list_frame = ttk.Frame(dialog, padding=(10, 0, 10, 0))
+        list_frame.pack(fill="both", expand=True)
+
+        tree = ttk.Treeview(
+            list_frame,
+            columns=("name", "number"),
+            show="headings",
+            selectmode="browse",
+            height=min(8, max(3, len(rows))),
+        )
+        tree.heading("name", text="Name")
+        tree.heading("number", text="Nummer")
+        tree.column("name", width=260)
+        tree.column("number", width=160)
+
+        tree_scroll = ttk.Scrollbar(
+            list_frame,
+            orient="vertical",
+            command=tree.yview,
+        )
+        tree.configure(yscrollcommand=tree_scroll.set)
+
+        tree.pack(side="left", fill="both", expand=True)
+        tree_scroll.pack(side="right", fill="y")
+
+        for phone, name in rows:
+            try:
+                tree.insert("", "end", values=(name, phone))
+            except Exception:
+                continue
+
+        def _close():
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+            self._candidates_dialog = None
+
+        def _pick(_event=None):
+            selected = tree.selection()
+            if not selected:
+                return
+            try:
+                values = tree.item(selected[0], "values")
+            except Exception:
+                return
+            name = (values[0] or "").strip() if values else ""
+            if not name:
+                return
+            self.unknown_name_var.set(name)
+            _close()
+
+        tree.bind("<Double-Button-1>", _pick)
+        tree.bind("<Return>", _pick)
+
+        button_row = ttk.Frame(dialog, padding=(10, 8, 10, 10))
+        button_row.pack(fill="x")
+
+        ttk.Button(
+            button_row,
+            text="Übernehmen",
+            command=_pick,
+        ).pack(side="right", padx=(4, 0))
+        ttk.Button(
+            button_row,
+            text="Abbrechen",
+            command=_close,
+        ).pack(side="right")
+
+        dialog.protocol("WM_DELETE_WINDOW", _close)
+        try:
+            children = tree.get_children()
+            if children:
+                tree.selection_set(children[0])
+                tree.focus(children[0])
+        except Exception:
+            pass
+        try:
+            dialog.grab_set()
+            tree.focus_set()
+        except Exception:
+            pass
 
     # --------------------------------------------------------
     # TABELLEN AKTUALISIEREN
@@ -4611,6 +4886,7 @@ if __name__ == "__main__":
     migrate_legacy_db()
     init_db()
     migrate_add_kontakt()
+    migrate_unknown_candidates()
     migrate_international_format()
     cleanup_old_call_logs()
     first_run_csv_import()
